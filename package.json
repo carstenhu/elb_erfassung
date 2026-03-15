@@ -1,0 +1,12 @@
+{
+  "name": "elb-erfassung",
+  "private": true,
+  "workspaces": [
+    "apps/desktop"
+  ],
+  "scripts": {
+    "desktop:dev": "npm --workspace apps/desktop run dev",
+    "desktop:build": "npm --workspace apps/desktop run build",
+    "desktop:lint": "npm --workspace apps/desktop run lint"
+  }
+}
