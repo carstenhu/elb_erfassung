@@ -3,7 +3,10 @@ import {
   createEmptyCase,
   createInitialData,
   createNewObject,
+  seedAuctions,
+  seedClerks,
   seedDepartments,
+  seedTitles,
 } from './defaults'
 import { loadSnapshot, saveSnapshot } from './db'
 import type { AppData, Auction, CaseRecord, Clerk, DepartmentInterest } from './types'
@@ -81,14 +84,57 @@ const ensureCaseSelection = (data: AppData) => {
 }
 
 const ensureSeedMasterData = (data: AppData) => {
-  const existingDepartmentCodes = new Set(
-    data.masterData.departments.map((department) => department.code),
+  const legacyClerkIds = new Set(['clerk-carsten', 'clerk-anna'])
+  const legacyAuctionIds = new Set(['auction-1', 'auction-2'])
+  const legacyDepartmentIds = new Set(['dep-art', 'dep-jew', 'dep-design'])
+
+  data.masterData.clerks = data.masterData.clerks.filter((clerk) => !legacyClerkIds.has(clerk.id))
+  data.masterData.auctions = data.masterData.auctions.filter(
+    (auction) => !legacyAuctionIds.has(auction.id),
   )
-  seedDepartments.forEach((department) => {
-    if (!existingDepartmentCodes.has(department.code)) {
-      data.masterData.departments.push(department)
+  data.masterData.departments = data.masterData.departments.filter(
+    (department) => !legacyDepartmentIds.has(department.id),
+  )
+
+  if (data.selectedClerkId && legacyClerkIds.has(data.selectedClerkId)) {
+    data.selectedClerkId = null
+  }
+
+  const clerkKeys = new Set(
+    data.masterData.clerks.map((clerk) => `${clerk.name}::${clerk.email}`.toLowerCase()),
+  )
+  seedClerks.forEach((clerk) => {
+    const key = `${clerk.name}::${clerk.email}`.toLowerCase()
+    if (!clerkKeys.has(key)) {
+      data.masterData.clerks.push(clerk)
+      clerkKeys.add(key)
+    }
+    data.numberingByClerk[clerk.id] = data.numberingByClerk[clerk.id] ?? 1
+  })
+
+  const auctionKeys = new Set(
+    data.masterData.auctions.map(
+      (auction) => `${auction.number}::${auction.month}::${auction.year}`.toLowerCase(),
+    ),
+  )
+  seedAuctions.forEach((auction) => {
+    const key = `${auction.number}::${auction.month}::${auction.year}`.toLowerCase()
+    if (!auctionKeys.has(key)) {
+      data.masterData.auctions.push(auction)
+      auctionKeys.add(key)
     }
   })
+
+  const departmentCodes = new Set(data.masterData.departments.map((department) => department.code))
+  seedDepartments.forEach((department) => {
+    if (!departmentCodes.has(department.code)) {
+      data.masterData.departments.push(department)
+      departmentCodes.add(department.code)
+    }
+  })
+
+  data.masterData.titles = Array.from(new Set([...data.masterData.titles, ...seedTitles]))
+
   return data
 }
 

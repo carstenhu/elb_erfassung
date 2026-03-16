@@ -11,22 +11,48 @@ const today = () => new Date().toISOString().slice(0, 10)
 
 export const seedClerks: Clerk[] = [
   {
-    id: 'clerk-carsten',
-    name: 'Carsten Muster',
-    email: 'carsten@example.com',
-    phone: '+41 44 555 00 11',
+    id: 'clerk-carsten-huebler',
+    name: 'Carsten H\u00fcbler',
+    email: 'huebler@kollerauktionen.ch',
+    phone: '+41 44 445 63 77',
+    signaturePng: '',
   },
   {
-    id: 'clerk-anna',
-    name: 'Anna Beispiel',
-    email: 'anna@example.com',
-    phone: '+41 44 555 00 12',
+    id: 'clerk-cyril-koller',
+    name: 'Cyril Koller',
+    email: 'Koller@kollerauktionen.ch',
+    phone: '+41 44 445 63 30',
+    signaturePng: '',
+  },
+  {
+    id: 'clerk-flavio-de-corso',
+    name: 'Flavio De Corso',
+    email: 'decorso@kollerauktionen.ch',
+    phone: '',
+    signaturePng: '',
+  },
+  {
+    id: 'clerk-sandro-wehrle',
+    name: 'Sandro Wehrle',
+    email: 'wehrle@kollerauktionen.ch',
+    phone: '+41 44 445 63 14',
+    signaturePng: '',
   },
 ]
 
 export const seedAuctions: Auction[] = [
-  { id: 'auction-1', number: '321', month: 'Mai', year: '2026' },
-  { id: 'auction-2', number: '322', month: 'Juni', year: '2026' },
+  { id: 'auction-nfu', number: 'NFU', month: '', year: '' },
+  { id: 'auction-unklar', number: 'Unklar', month: '', year: '' },
+  { id: 'auction-a216', number: 'A216', month: '03', year: '2026' },
+  { id: 'auction-ibid157', number: 'ibid157', month: '03', year: '2026' },
+  { id: 'auction-a217', number: 'A217', month: '06', year: '2026' },
+  { id: 'auction-ibid158', number: 'ibid158', month: '06', year: '2026' },
+  { id: 'auction-ibid159', number: 'ibid159', month: '07', year: '2026' },
+  { id: 'auction-a218', number: 'A218', month: '09', year: '2026' },
+  { id: 'auction-ibid160', number: 'ibid160', month: '09', year: '2026' },
+  { id: 'auction-a219', number: 'A219', month: '12', year: '2026' },
+  { id: 'auction-ibid162', number: 'ibid162', month: '12', year: '2026' },
+  { id: 'auction-a220', number: 'A220', month: '03', year: '2027' },
 ]
 
 export const seedDepartments: DepartmentInterest[] = [
@@ -35,19 +61,19 @@ export const seedDepartments: DepartmentInterest[] = [
   { id: 'dep-asia', code: 'ASIA', name: 'Asiatica' },
   { id: 'dep-auhr', code: 'AUHR', name: 'Armbanduhren' },
   { id: 'dep-auto', code: 'AUTO', name: 'Autographen' },
-  { id: 'dep-bi19', code: 'BI19', name: 'Gemälde des 19. Jahrhunderts' },
-  { id: 'dep-biam', code: 'BIAM', name: 'Gemälde Alter Meister' },
+  { id: 'dep-bi19', code: 'BI19', name: 'Gem\u00e4lde des 19. Jahrhunderts' },
+  { id: 'dep-biam', code: 'BIAM', name: 'Gem\u00e4lde Alter Meister' },
   { id: 'dep-bimo', code: 'BIMO', name: 'Moderne Kunst' },
   { id: 'dep-desi', code: 'DESI', name: 'Design' },
   { id: 'dep-bisw', code: 'BISW', name: 'Schweizer Kunst' },
-  { id: 'dep-bizg', code: 'BIZG', name: 'Zeitgenössische Kunst' },
-  { id: 'dep-buca', code: 'BUCA', name: 'Bücher Aufgeld' },
+  { id: 'dep-bizg', code: 'BIZG', name: 'Zeitgen\u00f6ssische Kunst' },
+  { id: 'dep-buca', code: 'BUCA', name: 'B\u00fccher Aufgeld' },
   { id: 'dep-buma', code: 'BUMA', name: 'Buchmalerei' },
   { id: 'dep-dose', code: 'DOSE', name: 'Dosen' },
   { id: 'dep-guhr', code: 'GUHR', name: 'Grossuhren' },
   { id: 'dep-mgra', code: 'MGRA', name: 'Moderne Grafik' },
   { id: 'dep-mini', code: 'MINI', name: 'Miniaturen' },
-  { id: 'dep-moeb', code: 'MOEB', name: 'Möbel' },
+  { id: 'dep-moeb', code: 'MOEB', name: 'M\u00f6bel' },
   { id: 'dep-vint', code: 'VINT', name: 'Handbags & Accessories' },
   { id: 'dep-phot', code: 'PHOT', name: 'Photographien' },
   { id: 'dep-porz', code: 'PORZ', name: 'Porzellan & Keramik' },
@@ -56,6 +82,8 @@ export const seedDepartments: DepartmentInterest[] = [
   { id: 'dep-tafa', code: 'TAFA', name: 'Tafelsilber' },
   { id: 'dep-waff', code: 'WAFF', name: 'Waffen & Militaria' },
 ]
+
+export const seedTitles = ['Dr.', 'Firma', 'Frau', 'Herr', 'Keine Anrede', 'Prof.']
 
 export const availableRequiredFields = [
   { key: 'meta.receiptNo', label: 'ELB-Nummer' },
@@ -67,8 +95,8 @@ export const availableRequiredFields = [
   { key: 'consignor.city', label: 'Einlieferer Stadt' },
   { key: 'bank.iban', label: 'IBAN' },
   { key: 'objects[].shortDesc', label: 'Objekt Kurzbeschreibung' },
-  { key: 'objects[].estimateLow', label: 'Objekt Schätzung von' },
-  { key: 'objects[].estimateHigh', label: 'Objekt Schätzung bis' },
+  { key: 'objects[].estimateLow', label: 'Objekt Sch\u00e4tzung von' },
+  { key: 'objects[].estimateHigh', label: 'Objekt Sch\u00e4tzung bis' },
   { key: 'objects[].departmentId', label: 'Objekt Abteilung' },
 ]
 
@@ -166,7 +194,7 @@ export const createInitialData = (): AppData => ({
     clerks: seedClerks,
     auctions: seedAuctions,
     departments: seedDepartments,
-    titles: ['Herr', 'Frau', 'Dr.', 'Firma'],
+    titles: seedTitles,
   },
   pdfRequiredFields: [
     'meta.receiptNo',

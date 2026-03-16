@@ -3,6 +3,7 @@ export type Clerk = {
   name: string
   email: string
   phone: string
+  signaturePng?: string
 }
 
 export type Auction = {
