@@ -1,8 +1,13 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { NavLink, Route, Routes } from 'react-router-dom'
 import clsx from 'clsx'
+import { GlobalWorkerOptions, getDocument } from 'pdfjs-dist'
+import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.mjs?url'
+import JSZip from 'jszip'
 import { availableRequiredFields } from './app/defaults'
 import {
+  buildElbPdf,
+  buildWordPdf,
   downloadElbPdf,
   downloadObjectsPdf,
   downloadWordDocx,
@@ -23,6 +28,8 @@ import type {
   ObjectItem,
   PreviewPage,
 } from './app/types'
+
+GlobalWorkerOptions.workerSrc = pdfWorkerUrl
 
 type SectionEditorTarget =
   | { type: 'consignor' }
@@ -65,6 +72,9 @@ const getByPath = (record: CaseRecord, path: string): unknown => {
 const formatObjectLabel = (item: ObjectItem, index: number) =>
   item.shortDesc ? `${index + 1}. ${item.shortDesc}` : `Objekt ${index + 1}`
 
+const formatObjectSelectLabel = (item: ObjectItem, index: number, total: number) =>
+  `Objekt ${index + 1}/${total} - ${item.intNo || '-'} - ${item.shortDesc || 'Ohne Kurzbeschrieb'}`
+
 const resolveMissingFields = (record: CaseRecord, requiredKeys: string[]) => {
   const missing: MissingFieldEntry[] = []
 
@@ -100,8 +110,8 @@ const getAuctionLabel = (masterData: MasterData, auctionId: string) => {
   return auction ? `${auction.number} / ${auction.month} ${auction.year}` : ''
 }
 
-const buildPdfPreviewPages = (record: CaseRecord): PreviewPage[] =>
-  buildPdfPreviewPagesFromMap(record)
+const buildPdfPreviewPages = (record: CaseRecord, masterData: MasterData): PreviewPage[] =>
+  buildPdfPreviewPagesFromMap(record, masterData)
 
 const buildWordPreviewPages = (record: CaseRecord, masterData: MasterData): PreviewPage[] =>
   buildWordPreviewPagesFromMap(record, masterData)
@@ -132,6 +142,18 @@ const readFilesAsDataUrls = async (files: FileList | File[]) => {
         }),
     ),
   )
+}
+
+const loadCaseRecordFromFile = async (file: File) => {
+  if (file.name.toLowerCase().endsWith('.zip')) {
+    const zip = await JSZip.loadAsync(await file.arrayBuffer())
+    const payload = await zip.file('payload.json')?.async('string')
+    if (!payload) {
+      throw new Error('In der ZIP-Datei wurde keine payload.json gefunden.')
+    }
+    return JSON.parse(payload) as CaseRecord
+  }
+  return JSON.parse(await file.text()) as CaseRecord
 }
 
 const useActiveCase = () => {
@@ -197,31 +219,40 @@ const SectionCard = ({ title, description, children }: { title: string; descript
     <div className="field-grid">{children}</div>
   </section>
 )
-const CaseSidebar = ({ activeCase }: { activeCase: CaseRecord | null }) => {
+
+const CaseListModal = ({ activeCase, onClose }: { activeCase: CaseRecord | null; onClose: () => void }) => {
   const data = useAppStore((state) => state.data)
   const createCase = useAppStore((state) => state.createCase)
   const setActiveCase = useAppStore((state) => state.setActiveCase)
   const selectedCases = data.cases.filter((record) => record.clerkId === data.selectedClerkId)
 
   return (
-    <aside className="sidebar">
-      <div className="sidebar-header">
-        <div>
-          <p className="eyebrow">Vorgaenge</p>
-          <h2>{data.masterData.clerks.find((clerk) => clerk.id === data.selectedClerkId)?.name ?? 'Kein Sachbearbeiter'}</h2>
+    <div className="overlay">
+      <div className="overlay-card">
+        <div className="modal-header">
+          <div>
+            <p className="eyebrow">Vorgaenge</p>
+            <h2>{data.masterData.clerks.find((clerk) => clerk.id === data.selectedClerkId)?.name ?? 'Kein Sachbearbeiter'}</h2>
+          </div>
+          <div className="inline-actions">
+            <button type="button" className="secondary-button" onClick={createCase}>Neuer Vorgang</button>
+            <button type="button" className="ghost-button" onClick={onClose}>Schliessen</button>
+          </div>
         </div>
-        <button type="button" className="secondary-button" onClick={createCase}>Neuer Vorgang</button>
+        <div className="case-list case-modal-list">
+          {selectedCases.map((record) => (
+            <button key={record.id} type="button" className={clsx('case-item', activeCase?.id === record.id && 'active')} onClick={() => {
+              setActiveCase(record.id)
+              onClose()
+            }}>
+              <strong>{record.meta.receiptNo || 'Unbenannt'}</strong>
+              <span>{record.consignor.lastName || 'Einlieferer offen'}</span>
+              <small>Revision {record.revision}</small>
+            </button>
+          ))}
+        </div>
       </div>
-      <div className="case-list">
-        {selectedCases.map((record) => (
-          <button key={record.id} type="button" className={clsx('case-item', activeCase?.id === record.id && 'active')} onClick={() => setActiveCase(record.id)}>
-            <strong>{record.meta.receiptNo || 'Unbenannt'}</strong>
-            <span>{record.consignor.lastName || 'Einlieferer offen'}</span>
-            <small>Revision {record.revision}</small>
-          </button>
-        ))}
-      </div>
-    </aside>
+    </div>
   )
 }
 
@@ -312,30 +343,36 @@ const ObjectEditor = ({ record, masterData, inModal = false, selectedObjectId }:
   const replaceObjectPhotos = useAppStore((state) => state.replaceObjectPhotos)
   const removePhoto = useAppStore((state) => state.removePhoto)
   const updateField = useAppStore((state) => state.updateField)
-  const objects = selectedObjectId ? record.objects.filter((item) => item.id === selectedObjectId) : record.objects
+  const [activeObjectId, setActiveObjectId] = useState(selectedObjectId ?? record.objects[0]?.id ?? '')
+  const effectiveObjectId =
+    selectedObjectId ??
+    (record.objects.some((item) => item.id === activeObjectId) ? activeObjectId : record.objects[0]?.id ?? '')
+
+  const objects = selectedObjectId
+    ? record.objects.filter((item) => item.id === selectedObjectId)
+    : record.objects.filter((item) => item.id === effectiveObjectId)
 
   return (
     <div className={clsx('page-stack', inModal && 'compact-stack')}>
-      {!selectedObjectId ? (
-        <SectionCard title="Konditionen" description="Diese Konditionen gelten fuer alle Objekte des Vorgangs">
-          <TextField label="Kommission" value={record.costs.kommission} onChange={(value) => updateField('costs.kommission', value)} />
-          <TextField label="Versicherung" value={record.costs.versicherung} onChange={(value) => updateField('costs.versicherung', value)} />
-          <TextField label="Transport" value={record.costs.transport} onChange={(value) => updateField('costs.transport', value)} />
-          <TextField label="Abb.-Kosten" value={record.costs.abbKosten} onChange={(value) => updateField('costs.abbKosten', value)} />
-          <TextField label="Kosten Expertisen" value={record.costs.kostenExpertisen} onChange={(value) => updateField('costs.kostenExpertisen', value)} />
-          <TextField label="Internet" value={record.costs.internet} onChange={(value) => updateField('costs.internet', value)} />
-          <CheckboxField label="Alle Kosten nur bei Erfolg" checked={record.costs.onlyIfSuccess} onChange={(value) => updateField('costs.onlyIfSuccess', value)} />
-          <TextField label="Provenienz / Diverses" value={record.costs.provenance} onChange={(value) => updateField('costs.provenance', value)} textarea />
-        </SectionCard>
-      ) : null}
-
       {!selectedObjectId ? (
         <div className="toolbar">
           <div>
             <p className="eyebrow">Objektverwaltung</p>
             <h3>{record.objects.length} Objekte im Vorgang</h3>
           </div>
-          <button type="button" className="primary-button" onClick={addObject}>Objekt hinzufuegen</button>
+          <div className="toolbar-actions">
+            <label className="compact-select">
+              <span>Objekt</span>
+              <select value={effectiveObjectId} onChange={(event) => setActiveObjectId(event.target.value)}>
+                {record.objects.map((item, index) => (
+                  <option key={item.id} value={item.id}>
+                    {formatObjectSelectLabel(item, index, record.objects.length)}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button type="button" className="primary-button" onClick={addObject}>Objekt hinzufuegen</button>
+          </div>
         </div>
       ) : null}
       {objects.map((item) => {
@@ -395,6 +432,19 @@ const ObjectEditor = ({ record, masterData, inModal = false, selectedObjectId }:
           </section>
         )
       })}
+
+      {!selectedObjectId ? (
+        <SectionCard title="Konditionen" description="Diese Konditionen gelten fuer alle Objekte des Vorgangs">
+          <TextField label="Kommission" value={record.costs.kommission} onChange={(value) => updateField('costs.kommission', value)} />
+          <TextField label="Versicherung" value={record.costs.versicherung} onChange={(value) => updateField('costs.versicherung', value)} />
+          <TextField label="Transport" value={record.costs.transport} onChange={(value) => updateField('costs.transport', value)} />
+          <TextField label="Abb.-Kosten" value={record.costs.abbKosten} onChange={(value) => updateField('costs.abbKosten', value)} />
+          <TextField label="Kosten Expertisen" value={record.costs.kostenExpertisen} onChange={(value) => updateField('costs.kostenExpertisen', value)} />
+          <TextField label="Internet" value={record.costs.internet} onChange={(value) => updateField('costs.internet', value)} />
+          <CheckboxField label="Alle Kosten nur bei Erfolg" checked={record.costs.onlyIfSuccess} onChange={(value) => updateField('costs.onlyIfSuccess', value)} />
+          <TextField label="Provenienz / Diverses" value={record.costs.provenance} onChange={(value) => updateField('costs.provenance', value)} textarea />
+        </SectionCard>
+      ) : null}
     </div>
   )
 }
@@ -404,74 +454,89 @@ const InterneInfosPage = ({ record, masterData }: { record: CaseRecord; masterDa
 
   return (
     <div className="page-stack">
-      <SectionCard title="Interessengebiete" description="Mehrfachauswahl aus der zentralen Stammdatenliste">
-        <MultiSelectField label="Interessengebiete" values={record.internalInfo.interestIds} onChange={(values) => updateField('internalInfo.interestIds', values)} options={masterData.departments.map((department) => ({ value: department.id, label: `${department.code} - ${department.name}` }))} />
-      </SectionCard>
       <SectionCard title="Interne Notizen">
         <TextField label="Notiz" value={record.internalInfo.note} onChange={(value) => updateField('internalInfo.note', value)} textarea />
+      </SectionCard>
+      <SectionCard title="Interessengebiete" description="Mehrfachauswahl aus der zentralen Stammdatenliste">
+        <MultiSelectField label="Interessengebiete" values={record.internalInfo.interestIds} onChange={(values) => updateField('internalInfo.interestIds', values)} options={masterData.departments.map((department) => ({ value: department.id, label: `${department.code} - ${department.name}` }))} />
       </SectionCard>
     </div>
   )
 }
 
-const PreviewSurface = ({
+const RenderedPreviewSurface = ({
   pages,
-  accent,
+  pdfFactory,
   onFieldClick,
 }: {
   pages: PreviewPage[]
-  accent: 'pdf' | 'word'
+  pdfFactory: () => Promise<Uint8Array>
   onFieldClick?: (editKey?: string) => void
-}) => (
-  <div className="preview-pages">
-    {pages.map((page) => (
-      <article key={page.id} className={clsx('preview-page', accent)}>
-        <header>
-          <p className="eyebrow">{page.title}</p>
-          <h3>{page.subtitle}</h3>
-        </header>
-        <div className="document-surface">
-          {page.fields.map((field) => (
-            <button
-              key={field.id}
-              type="button"
-              className="preview-field"
-              onClick={() => onFieldClick?.(field.editKey)}
-              style={{ left: `${field.x * 100}%`, top: `${field.y * 100}%`, width: `${field.w * 100}%`, height: `${field.h * 100}%` }}
-            >
-              <small>{field.label}</small>
-              <strong>{field.value || 'Leer'}</strong>
-            </button>
-          ))}
-        </div>
-      </article>
-    ))}
-  </div>
-)
+}) => {
+  const [images, setImages] = useState<string[]>([])
 
-const PreviewQuickEditor = ({ record, onEdit }: { record: CaseRecord; onEdit: (target: SectionEditorTarget) => void }) => (
-  <div className="quick-editor">
-    <section className="card">
-      <div className="card-header"><div><p className="eyebrow">Direkt aus der Vorschau</p><h3>Felder bearbeiten</h3></div></div>
-      <div className="action-list">
-        <button type="button" className="secondary-button" onClick={() => onEdit({ type: 'consignor' })}>Einlieferer bearbeiten</button>
-        <button type="button" className="secondary-button" onClick={() => onEdit({ type: 'owner' })}>Eigentuemer bearbeiten</button>
-        <button type="button" className="secondary-button" onClick={() => onEdit({ type: 'bank' })}>Bank bearbeiten</button>
-        <button type="button" className="secondary-button" onClick={() => onEdit({ type: 'costs' })}>Konditionen bearbeiten</button>
-        <button type="button" className="secondary-button" onClick={() => onEdit({ type: 'internal' })}>Interne Infos bearbeiten</button>
-        <button type="button" className="secondary-button" onClick={() => onEdit({ type: 'signature' })}>Signatur bearbeiten</button>
-      </div>
-    </section>
-    <section className="card">
-      <div className="card-header"><div><p className="eyebrow">Objekte</p><h3>{record.objects.length} Vorschau-Eintraege</h3></div></div>
-      <div className="action-list">
-        {record.objects.map((item, index) => (
-          <button key={item.id} type="button" className="secondary-button" onClick={() => onEdit({ type: 'object', objectId: item.id })}>{formatObjectLabel(item, index)}</button>
-        ))}
-      </div>
-    </section>
-  </div>
-)
+  useEffect(() => {
+    let active = true
+
+    const renderPages = async () => {
+      const pdfBytes = await pdfFactory()
+      const pdf = await getDocument({ data: pdfBytes }).promise
+      const nextImages: string[] = []
+
+      for (let pageIndex = 0; pageIndex < pdf.numPages; pageIndex += 1) {
+        const pdfPage = await pdf.getPage(pageIndex + 1)
+        const viewport = pdfPage.getViewport({ scale: 1.7 })
+        const canvas = document.createElement('canvas')
+        const context = canvas.getContext('2d')
+        if (!context) {
+          continue
+        }
+        canvas.width = viewport.width
+        canvas.height = viewport.height
+        await pdfPage.render({ canvas, canvasContext: context, viewport }).promise
+        nextImages.push(canvas.toDataURL('image/png'))
+      }
+
+      if (active) {
+        setImages(nextImages)
+      }
+    }
+
+    void renderPages()
+
+    return () => {
+      active = false
+    }
+  }, [pdfFactory])
+
+  return (
+    <div className="preview-pages">
+      {pages.map((page, index) => (
+        <article key={page.id} className={clsx('preview-page', page.kind)}>
+          <header>
+            <p className="eyebrow">{page.title}</p>
+            <h3>{page.subtitle}</h3>
+          </header>
+          <div className="document-surface rendered">
+            {images[index] ? <img src={images[index]} alt={page.title} className="document-image" /> : <div className="document-loading">Dokument wird gerendert...</div>}
+            {page.fields.map((field) => (
+              <button
+                key={field.id}
+                type="button"
+                className="preview-field"
+                onClick={() => onFieldClick?.(field.editKey)}
+                title={field.label}
+                style={{ left: `${field.x * 100}%`, top: `${field.y * 100}%`, width: `${field.w * 100}%`, height: `${field.h * 100}%` }}
+              >
+                <span>{field.value || field.label}</span>
+              </button>
+            ))}
+          </div>
+        </article>
+      ))}
+    </div>
+  )
+}
 
 const SignaturePad = ({ value, onChange }: { value: string; onChange: (value: string) => void }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
@@ -603,12 +668,23 @@ const SectionEditorModal = ({ target, record, masterData, onClose }: { target: S
           </div>
         ) : null}
 
-        {target.type === 'costs' ? <ObjectEditor record={record} masterData={masterData} inModal /> : null}
+        {target.type === 'costs' ? (
+          <div className="field-grid">
+            <TextField label="Kommission" value={record.costs.kommission} onChange={(value) => updateField('costs.kommission', value)} />
+            <TextField label="Versicherung" value={record.costs.versicherung} onChange={(value) => updateField('costs.versicherung', value)} />
+            <TextField label="Transport" value={record.costs.transport} onChange={(value) => updateField('costs.transport', value)} />
+            <TextField label="Abb.-Kosten" value={record.costs.abbKosten} onChange={(value) => updateField('costs.abbKosten', value)} />
+            <TextField label="Kosten Expertisen" value={record.costs.kostenExpertisen} onChange={(value) => updateField('costs.kostenExpertisen', value)} />
+            <TextField label="Internet" value={record.costs.internet} onChange={(value) => updateField('costs.internet', value)} />
+            <CheckboxField label="Alle Kosten nur bei Erfolg" checked={record.costs.onlyIfSuccess} onChange={(value) => updateField('costs.onlyIfSuccess', value)} />
+            <TextField label="Provenienz / Diverses" value={record.costs.provenance} onChange={(value) => updateField('costs.provenance', value)} textarea />
+          </div>
+        ) : null}
 
         {target.type === 'internal' ? (
           <div className="field-grid">
-            <MultiSelectField label="Interessengebiete" values={record.internalInfo.interestIds} onChange={(values) => updateField('internalInfo.interestIds', values)} options={masterData.departments.map((department) => ({ value: department.id, label: `${department.code} - ${department.name}` }))} />
             <TextField label="Interne Notiz" value={record.internalInfo.note} onChange={(value) => updateField('internalInfo.note', value)} textarea />
+            <MultiSelectField label="Interessengebiete" values={record.internalInfo.interestIds} onChange={(values) => updateField('internalInfo.interestIds', values)} options={masterData.departments.map((department) => ({ value: department.id, label: `${department.code} - ${department.name}` }))} />
           </div>
         ) : null}
 
@@ -649,7 +725,7 @@ const MissingFieldModal = ({ record, missing, onClose, onContinue }: { record: C
 const PdfPreviewPage = ({ record, masterData, onEdit }: { record: CaseRecord; masterData: MasterData; onEdit: (target: SectionEditorTarget) => void }) => {
   const data = useAppStore((state) => state.data)
   const [missingFields, setMissingFields] = useState<MissingFieldEntry[] | null>(null)
-  const pages = useMemo(() => buildPdfPreviewPages(record), [record])
+  const pages = useMemo(() => buildPdfPreviewPages(record, masterData), [record, masterData])
   const wordPreviewPages = useMemo(() => buildWordPreviewPages(record, masterData), [record, masterData])
 
   const handleExport = async () => {
@@ -663,10 +739,10 @@ const PdfPreviewPage = ({ record, masterData, onEdit }: { record: CaseRecord; ma
 
   return (
     <>
-      <div className="preview-layout">
-        <PreviewSurface
+      <div className="preview-stack">
+        <RenderedPreviewSurface
           pages={pages}
-          accent="pdf"
+          pdfFactory={() => buildElbPdf(record, masterData)}
           onFieldClick={(editKey) => {
             const target = editTargetFromKey(editKey)
             if (target) {
@@ -674,20 +750,14 @@ const PdfPreviewPage = ({ record, masterData, onEdit }: { record: CaseRecord; ma
             }
           }}
         />
-        <div className="preview-sidebar">
-          <PreviewQuickEditor record={record} onEdit={onEdit} />
-          <section className="card">
-            <div className="card-header"><div><p className="eyebrow">Signatur</p><h3>Unterschrift vor finalem Export</h3></div></div>
-            <SignaturePad value={record.signatures.consignorPng} onChange={(value) => useAppStore.getState().updateField('signatures.consignorPng', value)} />
-          </section>
-          <section className="card">
-            <div className="action-list">
-              <button type="button" className="primary-button" onClick={() => void handleExport()}>Definitives ELB-PDF exportieren</button>
-              <button type="button" className="secondary-button" onClick={() => void downloadObjectsPdf(record, masterData)}>Zusatz-PDF mit Objekten</button>
-              <button type="button" className="secondary-button" onClick={() => void exportAllArtifacts(record, masterData, wordPreviewPages)}>Finales ZIP erzeugen</button>
-            </div>
-          </section>
-        </div>
+        <section className="card preview-actions-card">
+          <div className="action-row">
+            <button type="button" className="secondary-button" onClick={() => onEdit({ type: 'signature' })}>Einlieferer unterschreiben</button>
+            <button type="button" className="primary-button" onClick={() => void handleExport()}>Definitives ELB-PDF exportieren</button>
+            <button type="button" className="secondary-button" onClick={() => void downloadObjectsPdf(record, masterData)}>Zusatz-PDF mit Objekten</button>
+            <button type="button" className="secondary-button" onClick={() => void exportAllArtifacts(record, masterData, wordPreviewPages)}>Finales ZIP erzeugen</button>
+          </div>
+        </section>
       </div>
 
       {missingFields ? (
@@ -715,10 +785,10 @@ const WordPreviewPage = ({ record, masterData, onEdit }: { record: CaseRecord; m
   const pages = useMemo(() => buildWordPreviewPages(record, masterData), [record, masterData])
 
   return (
-    <div className="preview-layout">
-      <PreviewSurface
+    <div className="preview-stack">
+      <RenderedPreviewSurface
         pages={pages}
-        accent="word"
+        pdfFactory={() => buildWordPdf(pages)}
         onFieldClick={(editKey) => {
           const target = editTargetFromKey(editKey)
           if (target) {
@@ -726,15 +796,12 @@ const WordPreviewPage = ({ record, masterData, onEdit }: { record: CaseRecord; m
           }
         }}
       />
-      <div className="preview-sidebar">
-        <PreviewQuickEditor record={record} onEdit={onEdit} />
-        <section className="card">
-          <div className="action-list">
-            <button type="button" className="primary-button" onClick={() => void downloadWordDocx(record, masterData)}>Definitive DOCX-Datei</button>
-            <button type="button" className="secondary-button" onClick={() => void downloadWordPdf(pages, record.meta.receiptNo)}>PDF aus Word-Vorschau</button>
-          </div>
-        </section>
-      </div>
+      <section className="card preview-actions-card">
+        <div className="action-row">
+          <button type="button" className="primary-button" onClick={() => void downloadWordDocx(record, masterData)}>Definitive DOCX-Datei</button>
+          <button type="button" className="secondary-button" onClick={() => void downloadWordPdf(pages, record.meta.receiptNo)}>PDF aus Word-Vorschau</button>
+        </div>
+      </section>
     </div>
   )
 }
@@ -752,7 +819,7 @@ const AdminPanel = () => {
   const removeDepartment = useAppStore((state) => state.removeDepartment)
   const setRequiredFields = useAppStore((state) => state.setRequiredFields)
 
-  const [draftClerk, setDraftClerk] = useState<Clerk>({ id: '', name: '', email: '', phone: '' })
+  const [draftClerk, setDraftClerk] = useState<Clerk>({ id: '', name: '', email: '', phone: '', signaturePng: '' })
   const [draftAuction, setDraftAuction] = useState<Auction>({ id: '', number: '', month: '', year: '' })
   const [draftDepartment, setDraftDepartment] = useState<DepartmentInterest>({ id: '', code: '', name: '' })
 
@@ -782,23 +849,27 @@ const AdminPanel = () => {
 
           <div className="admin-content">
             {activeSection === 'clerks' ? (
-              <section className="card">
-                <div className="field-grid">
+              <section className="card compact-admin-card">
+                <div className="compact-admin-form">
                   <TextField label="Name" value={draftClerk.name} onChange={(value) => setDraftClerk((current) => ({ ...current, name: value }))} />
                   <TextField label="E-Mail" value={draftClerk.email} onChange={(value) => setDraftClerk((current) => ({ ...current, email: value }))} />
                   <TextField label="Telefon" value={draftClerk.phone} onChange={(value) => setDraftClerk((current) => ({ ...current, phone: value }))} />
+                  <div className="field admin-signature-field">
+                    <span>Unterschrift</span>
+                    <SignaturePad value={draftClerk.signaturePng ?? ''} onChange={(value) => setDraftClerk((current) => ({ ...current, signaturePng: value }))} />
+                  </div>
                 </div>
                 <div className="inline-actions">
                   <button type="button" className="primary-button" onClick={() => {
                     if (!draftClerk.name.trim()) return
                     upsertClerk({ ...draftClerk, id: draftClerk.id || `clerk-${draftClerk.name.toLowerCase().replace(/\s+/g, '-')}` })
-                    setDraftClerk({ id: '', name: '', email: '', phone: '' })
+                    setDraftClerk({ id: '', name: '', email: '', phone: '', signaturePng: '' })
                   }}>Sachbearbeiter speichern</button>
                 </div>
                 <div className="admin-list">
                   {data.masterData.clerks.map((clerk) => (
-                    <div key={clerk.id} className="list-row">
-                      <div><strong>{clerk.name}</strong><span>{clerk.email}</span></div>
+                    <div key={clerk.id} className="list-row compact-row">
+                      <div><strong>{clerk.name}</strong><span>{clerk.email}</span><small>{clerk.phone}</small></div>
                       <div className="inline-actions">
                         <button type="button" className="secondary-button" onClick={() => setDraftClerk(clerk)}>Bearbeiten</button>
                         <button type="button" className="ghost-button" onClick={() => removeClerk(clerk.id)}>Loeschen</button>
@@ -810,8 +881,8 @@ const AdminPanel = () => {
             ) : null}
 
             {activeSection === 'auctions' ? (
-              <section className="card">
-                <div className="field-grid">
+              <section className="card compact-admin-card">
+                <div className="compact-admin-form">
                   <TextField label="Auktionsnummer" value={draftAuction.number} onChange={(value) => setDraftAuction((current) => ({ ...current, number: value }))} />
                   <TextField label="Monat" value={draftAuction.month} onChange={(value) => setDraftAuction((current) => ({ ...current, month: value }))} />
                   <TextField label="Jahr" value={draftAuction.year} onChange={(value) => setDraftAuction((current) => ({ ...current, year: value }))} />
@@ -825,7 +896,7 @@ const AdminPanel = () => {
                 </div>
                 <div className="admin-list">
                   {data.masterData.auctions.map((auction) => (
-                    <div key={auction.id} className="list-row">
+                    <div key={auction.id} className="list-row compact-row">
                       <div><strong>{auction.number}</strong><span>{auction.month} {auction.year}</span></div>
                       <div className="inline-actions">
                         <button type="button" className="secondary-button" onClick={() => setDraftAuction(auction)}>Bearbeiten</button>
@@ -838,8 +909,8 @@ const AdminPanel = () => {
             ) : null}
 
             {activeSection === 'departments' ? (
-              <section className="card">
-                <div className="field-grid">
+              <section className="card compact-admin-card">
+                <div className="compact-admin-form">
                   <TextField label="Code" value={draftDepartment.code} onChange={(value) => setDraftDepartment((current) => ({ ...current, code: value }))} />
                   <TextField label="Bezeichnung" value={draftDepartment.name} onChange={(value) => setDraftDepartment((current) => ({ ...current, name: value }))} />
                 </div>
@@ -852,7 +923,7 @@ const AdminPanel = () => {
                 </div>
                 <div className="admin-list">
                   {data.masterData.departments.map((department) => (
-                    <div key={department.id} className="list-row">
+                    <div key={department.id} className="list-row compact-row">
                       <div><strong>{department.code}</strong><span>{department.name}</span></div>
                       <div className="inline-actions">
                         <button type="button" className="secondary-button" onClick={() => setDraftDepartment(department)}>Bearbeiten</button>
@@ -889,10 +960,14 @@ const AdminPanel = () => {
 function App() {
   const initialize = useAppStore((state) => state.initialize)
   const setAdminOpen = useAppStore((state) => state.setAdminOpen)
+  const importCase = useAppStore((state) => state.importCase)
   const isHydrated = useAppStore((state) => state.isHydrated)
   const data = useAppStore((state) => state.data)
   const activeCase = useActiveCase()
   const [sectionEditor, setSectionEditor] = useState<SectionEditorTarget | null>(null)
+  const [menuOpen, setMenuOpen] = useState(false)
+  const [casesOpen, setCasesOpen] = useState(false)
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
 
   useEffect(() => {
     void initialize()
@@ -906,14 +981,11 @@ function App() {
     <div className="app-shell">
       <StartOverlay />
       <AdminPanel />
+      {casesOpen ? <CaseListModal activeCase={activeCase} onClose={() => setCasesOpen(false)} /> : null}
       {activeCase && sectionEditor ? <SectionEditorModal target={sectionEditor} record={activeCase} masterData={data.masterData} onClose={() => setSectionEditor(null)} /> : null}
 
       <header className="topbar">
         <div><p className="eyebrow">ELB Erfassung</p><h1>Desktop Phase 1</h1></div>
-        <div className="topbar-actions">
-          <button type="button" className="secondary-button" onClick={() => useAppStore.getState().selectClerk(null)}>Sachbearbeiter wechseln</button>
-          <button type="button" className="primary-button" onClick={() => setAdminOpen(true)}>Admin Panel</button>
-        </div>
       </header>
 
       <nav className="route-nav">
@@ -922,24 +994,64 @@ function App() {
             {item.label}
           </NavLink>
         ))}
+        <div className="menu-anchor">
+          <button type="button" className="primary-button compact-menu-button" onClick={() => setMenuOpen((current) => !current)}>Menue</button>
+          {menuOpen ? (
+            <div className="menu-dropdown">
+              <button type="button" className="menu-item" onClick={() => {
+                setCasesOpen(true)
+                setMenuOpen(false)
+              }}>Vorgaenge</button>
+              <button type="button" className="menu-item" onClick={() => {
+                setAdminOpen(true)
+                setMenuOpen(false)
+              }}>Admin</button>
+              <button type="button" className="menu-item" onClick={() => {
+                useAppStore.getState().selectClerk(null)
+                setMenuOpen(false)
+              }}>Sachbearbeiter wechseln</button>
+              <button type="button" className="menu-item" onClick={() => {
+                fileInputRef.current?.click()
+                setMenuOpen(false)
+              }}>Alte Vorgaenge laden</button>
+            </div>
+          ) : null}
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".json,.zip"
+            hidden
+            onChange={async (event) => {
+              const file = event.target.files?.[0]
+              if (!file) {
+                return
+              }
+              try {
+                const imported = await loadCaseRecordFromFile(file)
+                importCase(imported)
+              } catch (error) {
+                window.alert(error instanceof Error ? error.message : 'Vorgang konnte nicht geladen werden.')
+              } finally {
+                event.target.value = ''
+              }
+            }}
+          />
+        </div>
       </nav>
 
-      <div className="content-layout">
-        <CaseSidebar activeCase={activeCase} />
-        <main className="main-panel">
-          {!activeCase ? (
-            <div className="empty-state">Bitte zuerst einen Sachbearbeiter auswaehlen.</div>
-          ) : (
-            <Routes>
-              <Route path="/" element={<EinliefererPage record={activeCase} masterData={data.masterData} />} />
-              <Route path="/objekte" element={<ObjectEditor record={activeCase} masterData={data.masterData} />} />
-              <Route path="/interne-infos" element={<InterneInfosPage record={activeCase} masterData={data.masterData} />} />
-              <Route path="/pdf-vorschau" element={<PdfPreviewPage record={activeCase} masterData={data.masterData} onEdit={setSectionEditor} />} />
-              <Route path="/word-vorschau" element={<WordPreviewPage record={activeCase} masterData={data.masterData} onEdit={setSectionEditor} />} />
-            </Routes>
-          )}
-        </main>
-      </div>
+      <main className="main-panel solo-panel">
+        {!activeCase ? (
+          <div className="empty-state">Bitte zuerst einen Sachbearbeiter auswaehlen.</div>
+        ) : (
+          <Routes>
+            <Route path="/" element={<EinliefererPage record={activeCase} masterData={data.masterData} />} />
+            <Route path="/objekte" element={<ObjectEditor record={activeCase} masterData={data.masterData} />} />
+            <Route path="/interne-infos" element={<InterneInfosPage record={activeCase} masterData={data.masterData} />} />
+            <Route path="/pdf-vorschau" element={<PdfPreviewPage record={activeCase} masterData={data.masterData} onEdit={setSectionEditor} />} />
+            <Route path="/word-vorschau" element={<WordPreviewPage record={activeCase} masterData={data.masterData} onEdit={setSectionEditor} />} />
+          </Routes>
+        )}
+      </main>
     </div>
   )
 }

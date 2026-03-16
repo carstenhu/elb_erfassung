@@ -1,10 +1,40 @@
 import JSZip from 'jszip'
 import { Document, Packer, Paragraph, Table, TableCell, TableRow, TextRun } from 'docx'
-import { PDFDocument, StandardFonts, rgb, type PDFPage } from 'pdf-lib'
+import { PDFDocument, StandardFonts, rgb, type PDFField, type PDFPage } from 'pdf-lib'
 import { pdfExportAnchors } from './templateMaps'
 import type { CaseRecord, MasterData, PreviewPage } from './types'
 
 const a4 = { width: 595.28, height: 841.89 }
+const objectsPdfLayout = {
+  meta: {
+    intNo: { x: 0.08, y: 0.925, size: 11 },
+    shortDesc: { x: 0.2, y: 0.925, size: 11 },
+    department: { x: 0.08, y: 0.885, size: 10 },
+    auction: { x: 0.52, y: 0.885, size: 10 },
+    details: { x: 0.08, y: 0.835, width: 0.84, lineHeight: 12, size: 10 },
+    estimate: { x: 0.08, y: 0.69, size: 11 },
+    limit: { x: 0.52, y: 0.69, size: 10 },
+    remarks: { x: 0.08, y: 0.655, width: 0.84, lineHeight: 12, size: 9 },
+  },
+  photoGrid: {
+    startX: 0.08,
+    startY: 0.58,
+    maxColumns: 4,
+    boxWidth: 104,
+    boxHeight: 86,
+    gapX: 12,
+    gapY: 28,
+    captionOffset: 10,
+  },
+  summary: {
+    name: { x: 0.08, y: 0.92, size: 12 },
+    address: { x: 0.08, y: 0.885, size: 10 },
+    city: { x: 0.08, y: 0.855, size: 10 },
+    owner: { x: 0.08, y: 0.81, size: 10 },
+    bank: { x: 0.08, y: 0.765, size: 10 },
+    note: { x: 0.08, y: 0.72, width: 0.84, lineHeight: 13, size: 10 },
+  },
+} as const
 
 const fetchAsset = async (url: string) => {
   const response = await fetch(url)
@@ -32,6 +62,42 @@ const toArrayBuffer = (bytes: Uint8Array) => {
   const buffer = new ArrayBuffer(bytes.byteLength)
   new Uint8Array(buffer).set(bytes)
   return buffer
+}
+
+const fitIntoBox = (sourceWidth: number, sourceHeight: number, maxWidth: number, maxHeight: number) => {
+  const scale = Math.min(maxWidth / sourceWidth, maxHeight / sourceHeight)
+  return {
+    width: sourceWidth * scale,
+    height: sourceHeight * scale,
+  }
+}
+
+const buildAddressLines = (
+  lines: Array<string | undefined | null>,
+  maxLineLength = 34,
+) => {
+  const result: string[] = []
+
+  lines.filter(Boolean).forEach((line) => {
+    const chunks = String(line).split(/\s+/)
+    let current = ''
+
+    chunks.forEach((chunk) => {
+      const next = current ? `${current} ${chunk}` : chunk
+      if (next.length > maxLineLength && current) {
+        result.push(current)
+        current = chunk
+        return
+      }
+      current = next
+    })
+
+    if (current) {
+      result.push(current)
+    }
+  })
+
+  return result
 }
 
 const drawWrappedText = (
@@ -70,92 +136,77 @@ const drawWrappedText = (
   })
 }
 
+const getFieldByName = (form: ReturnType<PDFDocument['getForm']>, name: string) =>
+  form.getFields().find((field) => field.getName() === name) ?? null
+
+const setTextFieldValue = (
+  form: ReturnType<PDFDocument['getForm']>,
+  name: string,
+  value: string,
+) => {
+  const field = getFieldByName(form, name)
+  if (!field || !('setText' in field)) {
+    return
+  }
+  ;(field as PDFField & { setText: (next: string) => void }).setText(value)
+}
+
 export const buildElbPdf = async (record: CaseRecord, masterData: MasterData) => {
   const pdfBytes = await fetchAsset('/templates/template.pdf')
   const pdfDoc = await PDFDocument.load(pdfBytes)
   const font = await pdfDoc.embedFont(StandardFonts.Helvetica)
+  const form = pdfDoc.getForm()
   const pages = pdfDoc.getPages()
   const page = pages[0]
   const { width, height } = page.getSize()
+  const firstObject = record.objects[0]
 
   const clerkName = masterData.clerks.find((clerk) => clerk.id === record.clerkId)?.name ?? ''
-
-  page.drawText(record.meta.receiptNo, {
-    x: width * pdfExportAnchors.receiptNo.x,
-    y: height * pdfExportAnchors.receiptNo.y,
-    size: pdfExportAnchors.receiptNo.size,
-    font,
-  })
-  page.drawText(record.meta.date, {
-    x: width * pdfExportAnchors.date.x,
-    y: height * pdfExportAnchors.date.y,
-    size: pdfExportAnchors.date.size,
-    font,
-  })
-  page.drawText(clerkName, {
-    x: width * pdfExportAnchors.clerk.x,
-    y: height * pdfExportAnchors.clerk.y,
-    size: pdfExportAnchors.clerk.size,
-    font,
-  })
-  page.drawText(
-    `${record.consignor.title} ${record.consignor.firstName} ${record.consignor.lastName}`.trim(),
-    {
-      x: width * pdfExportAnchors.consignorName.x,
-      y: height * pdfExportAnchors.consignorName.y,
-      size: pdfExportAnchors.consignorName.size,
-      font,
-    },
-  )
-  page.drawText(
+  const consignorName = `${record.consignor.title} ${record.consignor.firstName} ${record.consignor.lastName}`.trim()
+  const consignorAddress = buildAddressLines([
+    record.consignor.company,
+    consignorName,
+    record.consignor.addressAddon1,
     `${record.consignor.street} ${record.consignor.houseNo}`.trim(),
-    {
-      x: width * pdfExportAnchors.consignorStreet.x,
-      y: height * pdfExportAnchors.consignorStreet.y,
-      size: pdfExportAnchors.consignorStreet.size,
-      font,
-    },
-  )
-  page.drawText(
     `${record.consignor.zip} ${record.consignor.city}`.trim(),
-    {
-      x: width * pdfExportAnchors.consignorCity.x,
-      y: height * pdfExportAnchors.consignorCity.y,
-      size: pdfExportAnchors.consignorCity.size,
-      font,
-    },
-  )
-  page.drawText(record.bank.iban, {
-    x: width * pdfExportAnchors.iban.x,
-    y: height * pdfExportAnchors.iban.y,
-    size: pdfExportAnchors.iban.size,
-    font,
-  })
-  drawWrappedText(
-    page,
-    record.internalInfo.note || ' ',
-    width * pdfExportAnchors.notes.x,
-    height * pdfExportAnchors.notes.y,
-    width * pdfExportAnchors.notes.width,
-    pdfExportAnchors.notes.lineHeight,
-    pdfExportAnchors.notes.size,
-  )
+    record.consignor.country,
+  ]).join('\n')
+  const ownerAddress = buildAddressLines([
+    `${record.owner.firstName} ${record.owner.lastName}`.trim(),
+    `${record.owner.street} ${record.owner.houseNo}`.trim(),
+    `${record.owner.zip} ${record.owner.city}`.trim(),
+    record.owner.country,
+  ]).join('\n')
 
-  record.objects.slice(0, 8).forEach((item, index) => {
-    const y = height * pdfExportAnchors.objectRowStartY - index * pdfExportAnchors.objectRowHeight
-    page.drawText(item.shortDesc || '-', {
-      x: width * pdfExportAnchors.objectDescX,
-      y,
-      size: 10,
-      font,
-    })
-    page.drawText(`${item.estimateLow || '-'} / ${item.estimateHigh || '-'}`, {
-      x: width * pdfExportAnchors.objectEstimateX,
-      y,
-      size: 10,
-      font,
-    })
-  })
+  setTextFieldValue(form, 'ELB Nr', record.meta.receiptNo)
+  setTextFieldValue(form, 'Datum', record.meta.date)
+  setTextFieldValue(form, 'Sachbearbeiter 2', clerkName)
+  setTextFieldValue(form, 'Adresse EL', consignorAddress)
+  setTextFieldValue(form, 'Adresse EG', ownerAddress)
+  setTextFieldValue(form, 'IBAN/Kontonr', record.bank.iban)
+  setTextFieldValue(form, 'BIC/SWIFT', record.bank.bic)
+  setTextFieldValue(form, 'Bankangaben: Beg\u00fcnstigter', record.bank.beneficiary)
+  setTextFieldValue(form, 'Kommission', record.costs.kommission)
+  setTextFieldValue(form, 'Transport', record.costs.transport)
+  setTextFieldValue(form, 'Abb', firstObject?.abbCost || record.costs.abbKosten)
+  setTextFieldValue(form, 'Abb.-Kosten', record.costs.abbKosten)
+  setTextFieldValue(form, 'Kosten ', record.costs.kostenExpertisen)
+  setTextFieldValue(form, 'Versicherung ', record.costs.versicherung)
+  setTextFieldValue(form, 'Diverses/Provenienz 2', [record.costs.provenance, record.internalInfo.note].filter(Boolean).join('\n\n'))
+  setTextFieldValue(form, 'Sch\u00e4tzung 1', firstObject ? `${firstObject.estimateLow || '-'} / ${firstObject.estimateHigh || '-'}` : '')
+  setTextFieldValue(form, 'Kurzbeschreibung 1', firstObject?.shortDesc || '')
+  setTextFieldValue(form, 'Int-Nr 1', firstObject?.intNo || '')
+  setTextFieldValue(form, 'Erhalten 1', firstObject?.received || '')
+  setTextFieldValue(
+    form,
+    'Kapitel 1',
+    firstObject ? masterData.departments.find((entry) => entry.id === firstObject.departmentId)?.name ?? '' : '',
+  )
+  setTextFieldValue(form, 'Internet  1', record.costs.internet)
+  setTextFieldValue(form, 'EL ID/Passnr  1', record.consignor.passportNo)
+  setTextFieldValue(form, 'EL Nationalit\u00e4t  1', record.consignor.nationality)
+  setTextFieldValue(form, 'EL Geburtsdatum 1', record.consignor.birthdate)
+  form.updateFieldAppearances(font)
 
   if (record.signatures.consignorPng) {
     const png = await pdfDoc.embedPng(await dataUrlToBytes(record.signatures.consignorPng))
@@ -184,37 +235,95 @@ export const buildObjectsPdf = async (record: CaseRecord, masterData: MasterData
       const page = outputDoc.getPages().at(-1)!
       const { width, height } = page.getSize()
       const department = masterData.departments.find((entry) => entry.id === item.departmentId)?.name ?? ''
+      const auction = masterData.auctions.find((entry) => entry.id === item.auctionId)
 
-      page.drawText(item.intNo || '-', { x: width * 0.1, y: height * 0.9, size: 12, font })
-      page.drawText(item.shortDesc || '-', { x: width * 0.18, y: height * 0.9, size: 12, font })
-      page.drawText(department, { x: width * 0.1, y: height * 0.85, size: 11, font })
-      drawWrappedText(page, item.desc || item.remarks || ' ', width * 0.1, height * 0.8, width * 0.78, 14, 10)
-      page.drawText(`${item.estimateLow || '-'} bis ${item.estimateHigh || '-'}`, {
-        x: width * 0.1,
-        y: height * 0.66,
-        size: 11,
+      page.drawText(item.intNo || '-', {
+        x: width * objectsPdfLayout.meta.intNo.x,
+        y: height * objectsPdfLayout.meta.intNo.y,
+        size: objectsPdfLayout.meta.intNo.size,
         font,
       })
+      page.drawText(item.shortDesc || '-', {
+        x: width * objectsPdfLayout.meta.shortDesc.x,
+        y: height * objectsPdfLayout.meta.shortDesc.y,
+        size: objectsPdfLayout.meta.shortDesc.size,
+        font,
+      })
+      page.drawText(department || '-', {
+        x: width * objectsPdfLayout.meta.department.x,
+        y: height * objectsPdfLayout.meta.department.y,
+        size: objectsPdfLayout.meta.department.size,
+        font,
+      })
+      page.drawText(auction ? `${auction.number} ${auction.month}/${auction.year}`.trim() : '-', {
+        x: width * objectsPdfLayout.meta.auction.x,
+        y: height * objectsPdfLayout.meta.auction.y,
+        size: objectsPdfLayout.meta.auction.size,
+        font,
+      })
+      drawWrappedText(
+        page,
+        item.desc || item.shortDesc || ' ',
+        width * objectsPdfLayout.meta.details.x,
+        height * objectsPdfLayout.meta.details.y,
+        width * objectsPdfLayout.meta.details.width,
+        objectsPdfLayout.meta.details.lineHeight,
+        objectsPdfLayout.meta.details.size,
+      )
+      page.drawText(`${item.estimateLow || '-'} bis ${item.estimateHigh || '-'}`, {
+        x: width * objectsPdfLayout.meta.estimate.x,
+        y: height * objectsPdfLayout.meta.estimate.y,
+        size: objectsPdfLayout.meta.estimate.size,
+        font,
+      })
+      page.drawText(item.limit ? `Limite: ${item.limit}` : '-', {
+        x: width * objectsPdfLayout.meta.limit.x,
+        y: height * objectsPdfLayout.meta.limit.y,
+        size: objectsPdfLayout.meta.limit.size,
+        font,
+      })
+      drawWrappedText(
+        page,
+        item.remarks || ' ',
+        width * objectsPdfLayout.meta.remarks.x,
+        height * objectsPdfLayout.meta.remarks.y,
+        width * objectsPdfLayout.meta.remarks.width,
+        objectsPdfLayout.meta.remarks.lineHeight,
+        objectsPdfLayout.meta.remarks.size,
+      )
 
       const chunk = item.photos.slice(pageIndex * 8, pageIndex * 8 + 8)
       for (const [photoIndex, photo] of chunk.entries()) {
-        const column = photoIndex % 4
-        const row = Math.floor(photoIndex / 4)
-        const targetWidth = 105
-        const targetHeight = 85
-        const x = width * 0.1 + column * 115
-        const y = height * 0.44 - row * 110
+        const column = photoIndex % objectsPdfLayout.photoGrid.maxColumns
+        const row = Math.floor(photoIndex / objectsPdfLayout.photoGrid.maxColumns)
+        const x =
+          width * objectsPdfLayout.photoGrid.startX +
+          column * (objectsPdfLayout.photoGrid.boxWidth + objectsPdfLayout.photoGrid.gapX)
+        const y =
+          height * objectsPdfLayout.photoGrid.startY -
+          row * (objectsPdfLayout.photoGrid.boxHeight + objectsPdfLayout.photoGrid.gapY)
         const bytes = await dataUrlToBytes(photo.dataUrl)
         const image = photo.dataUrl.startsWith('data:image/png')
           ? await outputDoc.embedPng(bytes)
           : await outputDoc.embedJpg(bytes)
+        const fitted = fitIntoBox(
+          image.width,
+          image.height,
+          objectsPdfLayout.photoGrid.boxWidth,
+          objectsPdfLayout.photoGrid.boxHeight,
+        )
         page.drawImage(image, {
-          x,
-          y,
-          width: targetWidth,
-          height: targetHeight,
+          x: x + (objectsPdfLayout.photoGrid.boxWidth - fitted.width) / 2,
+          y: y + (objectsPdfLayout.photoGrid.boxHeight - fitted.height) / 2,
+          width: fitted.width,
+          height: fitted.height,
         })
-        page.drawText(photo.name, { x, y: y - 12, size: 8, font })
+        page.drawText(photo.name, {
+          x,
+          y: y - objectsPdfLayout.photoGrid.captionOffset,
+          size: 8,
+          font,
+        })
       }
     }
   }
@@ -224,25 +333,47 @@ export const buildObjectsPdf = async (record: CaseRecord, masterData: MasterData
   const finalPage = outputDoc.getPages().at(-1)!
   const { width, height } = finalPage.getSize()
   finalPage.drawText(`${record.consignor.firstName} ${record.consignor.lastName}`.trim(), {
-    x: width * 0.1,
-    y: height * 0.9,
-    size: 13,
+    x: width * objectsPdfLayout.summary.name.x,
+    y: height * objectsPdfLayout.summary.name.y,
+    size: objectsPdfLayout.summary.name.size,
     font,
   })
   finalPage.drawText(`${record.consignor.street} ${record.consignor.houseNo}`.trim(), {
-    x: width * 0.1,
-    y: height * 0.865,
-    size: 11,
+    x: width * objectsPdfLayout.summary.address.x,
+    y: height * objectsPdfLayout.summary.address.y,
+    size: objectsPdfLayout.summary.address.size,
     font,
   })
   finalPage.drawText(`${record.consignor.zip} ${record.consignor.city}`.trim(), {
-    x: width * 0.1,
-    y: height * 0.835,
-    size: 11,
+    x: width * objectsPdfLayout.summary.city.x,
+    y: height * objectsPdfLayout.summary.city.y,
+    size: objectsPdfLayout.summary.city.size,
     font,
   })
-  finalPage.drawText(record.bank.iban, { x: width * 0.1, y: height * 0.76, size: 11, font })
-  drawWrappedText(finalPage, record.costs.provenance || ' ', width * 0.1, height * 0.68, width * 0.75, 14, 10)
+  finalPage.drawText(
+    `${record.owner.firstName} ${record.owner.lastName}`.trim() || '-',
+    {
+      x: width * objectsPdfLayout.summary.owner.x,
+      y: height * objectsPdfLayout.summary.owner.y,
+      size: objectsPdfLayout.summary.owner.size,
+      font,
+    },
+  )
+  finalPage.drawText(record.bank.iban || '-', {
+    x: width * objectsPdfLayout.summary.bank.x,
+    y: height * objectsPdfLayout.summary.bank.y,
+    size: objectsPdfLayout.summary.bank.size,
+    font,
+  })
+  drawWrappedText(
+    finalPage,
+    [record.costs.provenance, record.internalInfo.note].filter(Boolean).join('\n\n') || ' ',
+    width * objectsPdfLayout.summary.note.x,
+    height * objectsPdfLayout.summary.note.y,
+    width * objectsPdfLayout.summary.note.width,
+    objectsPdfLayout.summary.note.lineHeight,
+    objectsPdfLayout.summary.note.size,
+  )
 
   return outputDoc.save()
 }
@@ -344,29 +475,21 @@ export const buildWordDocx = async (record: CaseRecord, masterData: MasterData) 
 
 export const buildWordPdf = async (pages: PreviewPage[]) => {
   const pdf = await PDFDocument.create()
-  const font = await pdf.embedFont(StandardFonts.Helvetica)
+  const backgroundBytes = await fetchAsset('/templates/tmp_schaetzlist_objekte_page1.png')
+  const background = await pdf.embedPng(backgroundBytes)
 
   pages.forEach((previewPage) => {
     const page = pdf.addPage([a4.width, a4.height])
-    page.drawText(previewPage.title, { x: 40, y: 800, size: 18, font })
-    page.drawText(previewPage.subtitle, { x: 40, y: 782, size: 10, font, color: rgb(0.4, 0.4, 0.45) })
+    page.drawImage(background, { x: 0, y: 0, width: a4.width, height: a4.height })
     previewPage.fields.forEach((field) => {
-      page.drawRectangle({
-        x: a4.width * field.x,
-        y: a4.height - a4.height * field.y - a4.height * field.h,
-        width: a4.width * field.w,
-        height: a4.height * field.h,
-        borderColor: rgb(0.83, 0.83, 0.85),
-        borderWidth: 0.6,
-      })
       drawWrappedText(
         page,
-        `${field.label}: ${field.value || '-'}`,
-        a4.width * field.x + 8,
-        a4.height - a4.height * field.y - 16,
-        a4.width * field.w - 16,
+        field.value || '-',
+        a4.width * field.x,
+        a4.height - a4.height * field.y - 10,
+        a4.width * field.w,
         12,
-        9,
+        field.id.startsWith('word-object-') ? 10 : 11,
       )
     })
   })

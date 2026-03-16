@@ -34,6 +34,7 @@ type AppStore = {
   upsertDepartment: (department: DepartmentInterest) => void
   removeDepartment: (departmentId: string) => void
   setRequiredFields: (keys: string[]) => void
+  importCase: (record: CaseRecord) => void
   setAdminOpen: (open: boolean) => void
   setActiveAdminSection: (section: AdminSection) => void
 }
@@ -320,6 +321,21 @@ export const useAppStore = create<AppStore>((set) => ({
     set((state) => ({
       data: updateData(state.data, (draft) => {
         draft.pdfRequiredFields = keys
+      }),
+    }))
+  },
+  importCase: (record) => {
+    set((state) => ({
+      data: updateData(state.data, (draft) => {
+        const index = draft.cases.findIndex((entry) => entry.id === record.id)
+        if (index >= 0) {
+          draft.cases[index] = record
+        } else {
+          draft.cases.unshift(record)
+        }
+        draft.selectedClerkId = record.clerkId
+        draft.activeCaseId = record.id
+        draft.numberingByClerk[record.clerkId] = draft.numberingByClerk[record.clerkId] ?? 1
       }),
     }))
   },
