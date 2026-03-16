@@ -30,9 +30,31 @@ export const seedAuctions: Auction[] = [
 ]
 
 export const seedDepartments: DepartmentInterest[] = [
-  { id: 'dep-art', code: 'ART', name: 'Kunst' },
-  { id: 'dep-jew', code: 'JEW', name: 'Schmuck' },
-  { id: 'dep-design', code: 'DES', name: 'Design' },
+  { id: 'dep-agra', code: 'AGRA', name: 'Alte Grafik' },
+  { id: 'dep-anku', code: 'ANKU', name: 'Angewandte Kunst' },
+  { id: 'dep-asia', code: 'ASIA', name: 'Asiatica' },
+  { id: 'dep-auhr', code: 'AUHR', name: 'Armbanduhren' },
+  { id: 'dep-auto', code: 'AUTO', name: 'Autographen' },
+  { id: 'dep-bi19', code: 'BI19', name: 'Gemälde des 19. Jahrhunderts' },
+  { id: 'dep-biam', code: 'BIAM', name: 'Gemälde Alter Meister' },
+  { id: 'dep-bimo', code: 'BIMO', name: 'Moderne Kunst' },
+  { id: 'dep-desi', code: 'DESI', name: 'Design' },
+  { id: 'dep-bisw', code: 'BISW', name: 'Schweizer Kunst' },
+  { id: 'dep-bizg', code: 'BIZG', name: 'Zeitgenössische Kunst' },
+  { id: 'dep-buca', code: 'BUCA', name: 'Bücher Aufgeld' },
+  { id: 'dep-buma', code: 'BUMA', name: 'Buchmalerei' },
+  { id: 'dep-dose', code: 'DOSE', name: 'Dosen' },
+  { id: 'dep-guhr', code: 'GUHR', name: 'Grossuhren' },
+  { id: 'dep-mgra', code: 'MGRA', name: 'Moderne Grafik' },
+  { id: 'dep-mini', code: 'MINI', name: 'Miniaturen' },
+  { id: 'dep-moeb', code: 'MOEB', name: 'Möbel' },
+  { id: 'dep-vint', code: 'VINT', name: 'Handbags & Accessories' },
+  { id: 'dep-phot', code: 'PHOT', name: 'Photographien' },
+  { id: 'dep-porz', code: 'PORZ', name: 'Porzellan & Keramik' },
+  { id: 'dep-schm', code: 'SCHM', name: 'Schmuck' },
+  { id: 'dep-silb', code: 'SILB', name: 'Silber' },
+  { id: 'dep-tafa', code: 'TAFA', name: 'Tafelsilber' },
+  { id: 'dep-waff', code: 'WAFF', name: 'Waffen & Militaria' },
 ]
 
 export const availableRequiredFields = [

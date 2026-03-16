@@ -1,5 +1,10 @@
 import { create } from 'zustand'
-import { createEmptyCase, createInitialData, createNewObject } from './defaults'
+import {
+  createEmptyCase,
+  createInitialData,
+  createNewObject,
+  seedDepartments,
+} from './defaults'
 import { loadSnapshot, saveSnapshot } from './db'
 import type { AppData, Auction, CaseRecord, Clerk, DepartmentInterest } from './types'
 
@@ -75,6 +80,18 @@ const ensureCaseSelection = (data: AppData) => {
   return data
 }
 
+const ensureSeedMasterData = (data: AppData) => {
+  const existingDepartmentCodes = new Set(
+    data.masterData.departments.map((department) => department.code),
+  )
+  seedDepartments.forEach((department) => {
+    if (!existingDepartmentCodes.has(department.code)) {
+      data.masterData.departments.push(department)
+    }
+  })
+  return data
+}
+
 const persist = (data: AppData) => {
   void saveSnapshot(data)
 }
@@ -97,6 +114,7 @@ export const useAppStore = create<AppStore>((set) => ({
   initialize: async () => {
     const snapshot = await loadSnapshot()
     const base = snapshot ?? createInitialData()
+    ensureSeedMasterData(base)
     ensureCaseSelection(base)
     set({ data: base, isHydrated: true })
     persist(base)
