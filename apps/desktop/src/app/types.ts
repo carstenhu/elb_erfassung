@@ -65,6 +65,7 @@ export type Consignor = {
   birthdate: string
   nationality: string
   passportNo: string
+  passportPhoto?: string
 }
 
 export type Owner = {
@@ -82,7 +83,7 @@ export type BankDetails = {
   beneficiary: string
   iban: string
   bic: string
-  diffBeneficiary: string
+  diffBeneficiary: boolean
   diffBeneficiaryName: string
   diffReason: string
 }

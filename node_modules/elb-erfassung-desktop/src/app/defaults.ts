@@ -100,21 +100,21 @@ export const availableRequiredFields = [
   { key: 'objects[].departmentId', label: 'Objekt Abteilung' },
 ]
 
-const emptyObject = (): ObjectItem => ({
-  id: crypto.randomUUID(),
-  intNo: '',
-  auctionId: '',
-  departmentId: '',
-  shortDesc: '',
-  desc: '',
-  estimateLow: '',
-  estimateHigh: '',
-  limit: '',
-  netLimit: false,
-  abbCost: '',
-  received: '',
-  remarks: '',
-  photos: [],
+const emptyObject = (seed: Partial<ObjectItem> = {}): ObjectItem => ({
+  id: seed.id ?? crypto.randomUUID(),
+  intNo: seed.intNo ?? '',
+  auctionId: seed.auctionId ?? '',
+  departmentId: seed.departmentId ?? '',
+  shortDesc: seed.shortDesc ?? '',
+  desc: seed.desc ?? '',
+  estimateLow: seed.estimateLow ?? '',
+  estimateHigh: seed.estimateHigh ?? '',
+  limit: seed.limit ?? '',
+  netLimit: seed.netLimit ?? false,
+  abbCost: seed.abbCost ?? '',
+  received: seed.received ?? '',
+  remarks: seed.remarks ?? '',
+  photos: seed.photos ?? [],
 })
 
 const nextReceiptNumber = (clerkId: string, nextCounter: number) => {
@@ -150,6 +150,7 @@ export const createEmptyCase = (clerkId: string, counter: number): CaseRecord =>
     birthdate: '',
     nationality: '',
     passportNo: '',
+    passportPhoto: '',
   },
   owner: {
     sameAsConsignor: true,
@@ -165,7 +166,7 @@ export const createEmptyCase = (clerkId: string, counter: number): CaseRecord =>
     beneficiary: '',
     iban: '',
     bic: '',
-    diffBeneficiary: '',
+    diffBeneficiary: false,
     diffBeneficiaryName: '',
     diffReason: '',
   },
@@ -211,4 +212,4 @@ export const createInitialData = (): AppData => ({
   activeCaseId: null,
 })
 
-export const createNewObject = emptyObject
+export const createNewObject = (seed?: Partial<ObjectItem>) => emptyObject(seed)

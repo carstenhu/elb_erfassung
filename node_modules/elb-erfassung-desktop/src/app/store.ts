@@ -9,7 +9,7 @@ import {
   seedTitles,
 } from './defaults'
 import { loadSnapshot, saveSnapshot } from './db'
-import type { AppData, Auction, CaseRecord, Clerk, DepartmentInterest } from './types'
+import type { AppData, Auction, CaseRecord, Clerk, DepartmentInterest, ObjectItem } from './types'
 
 type AdminSection = 'clerks' | 'auctions' | 'departments' | 'required-fields'
 
@@ -23,7 +23,7 @@ type AppStore = {
   createCase: () => void
   setActiveCase: (caseId: string) => void
   updateField: (path: string, value: unknown) => void
-  addObject: () => void
+  addObject: (seed?: Partial<ObjectItem>) => string | null
   removeObject: (objectId: string) => void
   replaceObjectPhotos: (objectId: string, photos: { id: string; name: string; dataUrl: string }[]) => void
   removePhoto: (objectId: string, photoId: string) => void
@@ -136,6 +136,12 @@ const ensureSeedMasterData = (data: AppData) => {
 
   data.masterData.titles = Array.from(new Set([...data.masterData.titles, ...seedTitles]))
 
+  data.cases.forEach((record) => {
+    if (typeof record.bank.diffBeneficiary !== 'boolean') {
+      record.bank.diffBeneficiary = Boolean(record.bank.diffBeneficiary)
+    }
+  })
+
   return data
 }
 
@@ -206,17 +212,21 @@ export const useAppStore = create<AppStore>((set) => ({
       }),
     }))
   },
-  addObject: () => {
+  addObject: (seed) => {
+    let createdId: string | null = null
     set((state) => ({
       data: updateData(state.data, (draft) => {
         const record = getActiveCase(draft)
         if (!record) {
           return
         }
-        record.objects.push(createNewObject())
+        const nextObject = createNewObject(seed)
+        createdId = nextObject.id
+        record.objects.push(nextObject)
         touchCase(record)
       }),
     }))
+    return createdId
   },
   removeObject: (objectId) => {
     set((state) => ({

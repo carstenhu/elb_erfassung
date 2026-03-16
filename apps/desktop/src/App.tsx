@@ -7,17 +7,17 @@ import JSZip from 'jszip'
 import { availableRequiredFields } from './app/defaults'
 import {
   buildElbPdf,
-  buildWordPdf,
+  buildWordDocx,
   downloadElbPdf,
   downloadObjectsPdf,
   downloadWordDocx,
   downloadWordPdf,
   exportAllArtifacts,
 } from './app/exports'
+import { formatSwissNumber, getEffectiveBeneficiary } from './app/format'
 import { useAppStore } from './app/store'
 import {
   buildPdfPreviewPages as buildPdfPreviewPagesFromMap,
-  buildWordPreviewPages as buildWordPreviewPagesFromMap,
 } from './app/templateMaps'
 import type {
   Auction,
@@ -31,8 +31,34 @@ import type {
 
 GlobalWorkerOptions.workerSrc = pdfWorkerUrl
 
+const loadScript = (src: string) =>
+  new Promise<void>((resolve, reject) => {
+    const existing = document.querySelector(`script[data-src="${src}"]`) as HTMLScriptElement | null
+    if (existing) {
+      if (existing.dataset.loaded === 'true') {
+        resolve()
+        return
+      }
+      existing.addEventListener('load', () => resolve(), { once: true })
+      existing.addEventListener('error', () => reject(new Error(`Script konnte nicht geladen werden: ${src}`)), { once: true })
+      return
+    }
+
+    const script = document.createElement('script')
+    script.src = src
+    script.async = true
+    script.dataset.src = src
+    script.addEventListener('load', () => {
+      script.dataset.loaded = 'true'
+      resolve()
+    }, { once: true })
+    script.addEventListener('error', () => reject(new Error(`Script konnte nicht geladen werden: ${src}`)), { once: true })
+    document.head.appendChild(script)
+  })
+
 type SectionEditorTarget =
   | { type: 'consignor' }
+  | { type: 'clerk' }
   | { type: 'owner' }
   | { type: 'bank' }
   | { type: 'costs' }
@@ -110,11 +136,14 @@ const getAuctionLabel = (masterData: MasterData, auctionId: string) => {
   return auction ? `${auction.number} / ${auction.month} ${auction.year}` : ''
 }
 
+const isIbidObject = (masterData: MasterData, auctionId: string) =>
+  (masterData.auctions.find((entry) => entry.id === auctionId)?.number ?? '').toLowerCase().startsWith('ibid')
+
+const getLimitLabel = (isIbid: boolean, netLimit: boolean) =>
+  isIbid ? 'Startpreis' : netLimit ? 'Nettolimite' : 'Limite'
+
 const buildPdfPreviewPages = (record: CaseRecord, masterData: MasterData): PreviewPage[] =>
   buildPdfPreviewPagesFromMap(record, masterData)
-
-const buildWordPreviewPages = (record: CaseRecord, masterData: MasterData): PreviewPage[] =>
-  buildWordPreviewPagesFromMap(record, masterData)
 
 const editTargetFromKey = (editKey?: string): SectionEditorTarget | null => {
   if (!editKey) {
@@ -123,7 +152,7 @@ const editTargetFromKey = (editKey?: string): SectionEditorTarget | null => {
   if (editKey.startsWith('object:')) {
     return { type: 'object', objectId: editKey.replace('object:', '') }
   }
-  if (editKey === 'consignor' || editKey === 'owner' || editKey === 'bank' || editKey === 'costs' || editKey === 'internal' || editKey === 'signature') {
+  if (editKey === 'consignor' || editKey === 'clerk' || editKey === 'owner' || editKey === 'bank' || editKey === 'costs' || editKey === 'internal' || editKey === 'signature') {
     return { type: editKey }
   }
   return null
@@ -144,6 +173,14 @@ const readFilesAsDataUrls = async (files: FileList | File[]) => {
   )
 }
 
+const readSingleFileAsDataUrl = async (file: File) =>
+  new Promise<string>((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result))
+    reader.onerror = () => reject(reader.error)
+    reader.readAsDataURL(file)
+  })
+
 const loadCaseRecordFromFile = async (file: File) => {
   if (file.name.toLowerCase().endsWith('.zip')) {
     const zip = await JSZip.loadAsync(await file.arrayBuffer())
@@ -161,16 +198,57 @@ const useActiveCase = () => {
   return useMemo(() => data.cases.find((record) => record.id === data.activeCaseId) ?? null, [data.activeCaseId, data.cases])
 }
 
-const TextField = ({ label, value, onChange, textarea, type = 'text' }: { label: string; value: string; onChange: (value: string) => void; textarea?: boolean; type?: string }) => (
-  <label className="field">
-    <span>{label}</span>
-    {textarea ? <textarea value={value} onChange={(event) => onChange(event.target.value)} rows={4} /> : <input type={type} value={value} onChange={(event) => onChange(event.target.value)} />}
+const TextField = ({
+  label,
+  value,
+  onChange,
+  textarea,
+  type = 'text',
+  readOnly,
+  disabled,
+  inputMode,
+  placeholder,
+  help,
+  title,
+  className,
+}: {
+  label: string
+  value: string
+  onChange: (value: string) => void
+  textarea?: boolean
+  type?: string
+  readOnly?: boolean
+  disabled?: boolean
+  inputMode?: 'none' | 'text' | 'tel' | 'url' | 'email' | 'numeric' | 'decimal' | 'search'
+  placeholder?: string
+  help?: string
+  title?: string
+  className?: string
+}) => (
+  <label className={clsx('field', className)}>
+    <span title={title}>{label}</span>
+    {textarea ? (
+      <textarea value={value} onChange={(event) => onChange(event.target.value)} rows={4} readOnly={readOnly} disabled={disabled} placeholder={placeholder} />
+    ) : (
+      <input type={type} value={value} onChange={(event) => onChange(event.target.value)} readOnly={readOnly} disabled={disabled} inputMode={inputMode} placeholder={placeholder} />
+    )}
+    {help ? <small>{help}</small> : null}
   </label>
 )
 
-const CheckboxField = ({ label, checked, onChange }: { label: string; checked: boolean; onChange: (checked: boolean) => void }) => (
-  <label className="checkbox-field">
-    <input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} />
+const NumberField = ({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) => (
+  <TextField
+    label={label}
+    value={value}
+    onChange={(next) => onChange(formatSwissNumber(next))}
+    inputMode="numeric"
+    placeholder="0"
+  />
+)
+
+const CheckboxField = ({ label, checked, onChange, disabled }: { label: string; checked: boolean; onChange: (checked: boolean) => void; disabled?: boolean }) => (
+  <label className={clsx('checkbox-field', disabled && 'disabled')}>
+    <input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} disabled={disabled} />
     <span>{label}</span>
   </label>
 )
@@ -286,6 +364,8 @@ const StartOverlay = () => {
 
 const EinliefererPage = ({ record, masterData }: { record: CaseRecord; masterData: MasterData }) => {
   const updateField = useAppStore((state) => state.updateField)
+  const beneficiaryName = getEffectiveBeneficiary(record)
+  const companySelected = record.consignor.captureCompanyAddress
 
   return (
     <div className="page-stack">
@@ -293,12 +373,12 @@ const EinliefererPage = ({ record, masterData }: { record: CaseRecord; masterDat
         <TextField label="ELB-Nummer" value={record.meta.receiptNo} onChange={(value) => updateField('meta.receiptNo', value)} />
         <TextField label="Datum" type="date" value={record.meta.date} onChange={(value) => updateField('meta.date', value)} />
         <TextField label="Kundennummer" value={record.consignor.customerNo} onChange={(value) => updateField('consignor.customerNo', value)} />
-        <SelectField label="Anrede" value={record.consignor.title} onChange={(value) => updateField('consignor.title', value)} options={masterData.titles.map((title) => ({ value: title, label: title }))} />
       </SectionCard>
 
       <SectionCard title="Einlieferer" description="Adress- und Personendaten">
-        <CheckboxField label="Firmenadresse statt Privatadresse" checked={record.consignor.captureCompanyAddress} onChange={(value) => updateField('consignor.captureCompanyAddress', value)} />
-        <TextField label="Firma" value={record.consignor.company} onChange={(value) => updateField('consignor.company', value)} />
+        <CheckboxField label="Firmenadresse" checked={record.consignor.captureCompanyAddress} onChange={(value) => updateField('consignor.captureCompanyAddress', value)} />
+        <SelectField label="Anrede" value={record.consignor.title} onChange={(value) => updateField('consignor.title', value)} options={masterData.titles.map((title) => ({ value: title, label: title }))} />
+        {companySelected ? <TextField className="span-two" label="Firma" value={record.consignor.company} onChange={(value) => updateField('consignor.company', value)} /> : null}
         <TextField label="Vorname" value={record.consignor.firstName} onChange={(value) => updateField('consignor.firstName', value)} />
         <TextField label="Nachname" value={record.consignor.lastName} onChange={(value) => updateField('consignor.lastName', value)} />
         <TextField label="Adresszusatz" value={record.consignor.addressAddon1} onChange={(value) => updateField('consignor.addressAddon1', value)} />
@@ -309,29 +389,77 @@ const EinliefererPage = ({ record, masterData }: { record: CaseRecord; masterDat
         <TextField label="Land" value={record.consignor.country} onChange={(value) => updateField('consignor.country', value)} />
         <TextField label="E-Mail" value={record.consignor.email} onChange={(value) => updateField('consignor.email', value)} />
         <TextField label="Telefon" value={record.consignor.phone} onChange={(value) => updateField('consignor.phone', value)} />
-        <TextField label="Geburtsdatum" value={record.consignor.birthdate} onChange={(value) => updateField('consignor.birthdate', value)} />
-        <TextField label="Nationalitaet" value={record.consignor.nationality} onChange={(value) => updateField('consignor.nationality', value)} />
-        <TextField label="ID-/Passnummer" value={record.consignor.passportNo} onChange={(value) => updateField('consignor.passportNo', value)} />
       </SectionCard>
 
-      <SectionCard title="Eigentuemer" description="Eigentuemerdaten liegen auf derselben Seite">
-        <CheckboxField label="Eigentuemer entspricht Einlieferer" checked={record.owner.sameAsConsignor} onChange={(value) => updateField('owner.sameAsConsignor', value)} />
-        <TextField label="Vorname" value={record.owner.firstName} onChange={(value) => updateField('owner.firstName', value)} />
-        <TextField label="Nachname" value={record.owner.lastName} onChange={(value) => updateField('owner.lastName', value)} />
-        <TextField label="Strasse" value={record.owner.street} onChange={(value) => updateField('owner.street', value)} />
-        <TextField label="Hausnummer" value={record.owner.houseNo} onChange={(value) => updateField('owner.houseNo', value)} />
-        <TextField label="PLZ" value={record.owner.zip} onChange={(value) => updateField('owner.zip', value)} />
-        <TextField label="Stadt" value={record.owner.city} onChange={(value) => updateField('owner.city', value)} />
-        <TextField label="Land" value={record.owner.country} onChange={(value) => updateField('owner.country', value)} />
+      <SectionCard title="Personendaten" description="Geburtsdatum, Nationalität, Ausweis und Passfoto">
+        <TextField label="Geburtsdatum" type="date" value={record.consignor.birthdate} onChange={(value) => updateField('consignor.birthdate', value)} />
+        <TextField label="Nationalität" value={record.consignor.nationality} onChange={(value) => updateField('consignor.nationality', value)} />
+        <TextField label="ID-/Passnummer" value={record.consignor.passportNo} onChange={(value) => updateField('consignor.passportNo', value)} />
+        <div className="field photo-field">
+          <span>Passfoto</span>
+          <label className="file-button">
+            Foto hochladen
+            <input
+              type="file"
+              accept="image/png,image/jpeg"
+              onChange={async (event) => {
+                const file = event.target.files?.[0]
+                if (!file) {
+                  return
+                }
+                updateField('consignor.passportPhoto', await readSingleFileAsDataUrl(file))
+                event.target.value = ''
+              }}
+            />
+          </label>
+          {record.consignor.passportPhoto ? (
+            <div className="passport-preview">
+              <img src={record.consignor.passportPhoto} alt="Passfoto" />
+              <button type="button" className="photo-remove" onClick={() => updateField('consignor.passportPhoto', '')} aria-label="Passfoto entfernen">x</button>
+            </div>
+          ) : null}
+        </div>
+      </SectionCard>
+
+      <SectionCard title="Eigentümer" description="Eigentümerdaten liegen auf derselben Seite">
+        <CheckboxField label="Eigentümer entspricht Einlieferer" checked={record.owner.sameAsConsignor} onChange={(value) => updateField('owner.sameAsConsignor', value)} />
+        {!record.owner.sameAsConsignor ? (
+          <>
+            <TextField label="Vorname" value={record.owner.firstName} onChange={(value) => updateField('owner.firstName', value)} />
+            <TextField label="Nachname" value={record.owner.lastName} onChange={(value) => updateField('owner.lastName', value)} />
+            <TextField label="Strasse" value={record.owner.street} onChange={(value) => updateField('owner.street', value)} />
+            <TextField label="Hausnummer" value={record.owner.houseNo} onChange={(value) => updateField('owner.houseNo', value)} />
+            <TextField label="PLZ" value={record.owner.zip} onChange={(value) => updateField('owner.zip', value)} />
+            <TextField label="Stadt" value={record.owner.city} onChange={(value) => updateField('owner.city', value)} />
+            <TextField label="Land" value={record.owner.country} onChange={(value) => updateField('owner.country', value)} />
+          </>
+        ) : null}
       </SectionCard>
 
       <SectionCard title="Bank" description="Bankdaten des gesamten Vorgangs">
-        <TextField label="Beguenstigter" value={record.bank.beneficiary} onChange={(value) => updateField('bank.beneficiary', value)} />
+        <TextField label="Begünstigter" value={beneficiaryName} onChange={() => undefined} readOnly help="Wird automatisch aus Firma oder Vorname/Nachname gebildet." />
         <TextField label="IBAN" value={record.bank.iban} onChange={(value) => updateField('bank.iban', value)} />
         <TextField label="BIC" value={record.bank.bic} onChange={(value) => updateField('bank.bic', value)} />
-        <TextField label="Abweichender Beguenstigter" value={record.bank.diffBeneficiary} onChange={(value) => updateField('bank.diffBeneficiary', value)} />
-        <TextField label="Name abweichender Beguenstigter" value={record.bank.diffBeneficiaryName} onChange={(value) => updateField('bank.diffBeneficiaryName', value)} />
-        <TextField label="Grund" value={record.bank.diffReason} onChange={(value) => updateField('bank.diffReason', value)} textarea />
+        <CheckboxField label="Abweichender Begünstigter" checked={record.bank.diffBeneficiary} onChange={(value) => updateField('bank.diffBeneficiary', value)} />
+        {record.bank.diffBeneficiary ? (
+          <>
+            <TextField
+              label="Grund für abweichenden Begünstigten"
+              value={record.bank.diffReason}
+              onChange={(value) => updateField('bank.diffReason', value)}
+              textarea
+              help={!record.bank.diffReason.trim() ? 'Grund fehlt noch.' : undefined}
+              title={!record.bank.diffReason.trim() ? 'Bitte zuerst den Grund angeben, damit der Name aktiviert wird.' : undefined}
+            />
+            <TextField
+              label="Name abweichender Begünstigter"
+              value={record.bank.diffBeneficiaryName}
+              onChange={(value) => updateField('bank.diffBeneficiaryName', value)}
+              disabled={!record.bank.diffReason.trim()}
+              help={!record.bank.diffReason.trim() ? 'Wird erst aktiv, sobald ein Grund erfasst ist.' : undefined}
+            />
+          </>
+        ) : null}
       </SectionCard>
     </div>
   )
@@ -352,6 +480,17 @@ const ObjectEditor = ({ record, masterData, inModal = false, selectedObjectId }:
     ? record.objects.filter((item) => item.id === selectedObjectId)
     : record.objects.filter((item) => item.id === effectiveObjectId)
 
+  const handleAddObject = () => {
+    const lastObject = record.objects.at(-1)
+    const nextObjectId = addObject({
+      auctionId: lastObject?.auctionId ?? '',
+      departmentId: lastObject?.departmentId ?? '',
+    })
+    if (nextObjectId) {
+      setActiveObjectId(nextObjectId)
+    }
+  }
+
   return (
     <div className={clsx('page-stack', inModal && 'compact-stack')}>
       {!selectedObjectId ? (
@@ -371,12 +510,14 @@ const ObjectEditor = ({ record, masterData, inModal = false, selectedObjectId }:
                 ))}
               </select>
             </label>
-            <button type="button" className="primary-button" onClick={addObject}>Objekt hinzufuegen</button>
+            <button type="button" className="primary-button" onClick={handleAddObject}>Objekt hinzufuegen</button>
           </div>
         </div>
       ) : null}
       {objects.map((item) => {
         const objectIndex = record.objects.findIndex((entry) => entry.id === item.id)
+        const isIbid = isIbidObject(masterData, item.auctionId)
+        const limitLabel = getLimitLabel(isIbid, item.netLimit)
         return (
           <section key={item.id} className="card">
             <div className="card-header split">
@@ -384,21 +525,27 @@ const ObjectEditor = ({ record, masterData, inModal = false, selectedObjectId }:
                 <h3>{formatObjectLabel(item, objectIndex)}</h3>
                 <p>{getAuctionLabel(masterData, item.auctionId) || 'Auktion noch nicht gewaehlt'}</p>
               </div>
-              {!selectedObjectId ? <button type="button" className="ghost-button" onClick={() => removeObject(item.id)}>Entfernen</button> : null}
+              {record.objects.length > 1 ? <button type="button" className="ghost-button" onClick={() => removeObject(item.id)}>Entfernen</button> : null}
             </div>
             <div className="field-grid">
               <TextField label="Int.-Nr." value={item.intNo} onChange={(value) => updateField(`objects[${objectIndex}].intNo`, value)} />
-              <SelectField label="Auktion" value={item.auctionId} onChange={(value) => updateField(`objects[${objectIndex}].auctionId`, value)} options={masterData.auctions.map((auction) => ({ value: auction.id, label: `${auction.number} / ${auction.month} ${auction.year}` }))} />
+              <SelectField label="Auktion" value={item.auctionId} onChange={(value) => {
+                updateField(`objects[${objectIndex}].auctionId`, value)
+                if (isIbidObject(masterData, value) && item.netLimit) {
+                  updateField(`objects[${objectIndex}].netLimit`, false)
+                }
+              }} options={masterData.auctions.map((auction) => ({ value: auction.id, label: `${auction.number} / ${auction.month} ${auction.year}` }))} />
               <SelectField label="Abteilung" value={item.departmentId} onChange={(value) => updateField(`objects[${objectIndex}].departmentId`, value)} options={masterData.departments.map((department) => ({ value: department.id, label: `${department.code} - ${department.name}` }))} />
-              <TextField label="Kurzbeschreibung" value={item.shortDesc} onChange={(value) => updateField(`objects[${objectIndex}].shortDesc`, value)} />
-              <TextField label="Beschreibung" value={item.desc} onChange={(value) => updateField(`objects[${objectIndex}].desc`, value)} textarea />
-              <TextField label="Schaetzung von" value={item.estimateLow} onChange={(value) => updateField(`objects[${objectIndex}].estimateLow`, value)} />
-              <TextField label="Schaetzung bis" value={item.estimateHigh} onChange={(value) => updateField(`objects[${objectIndex}].estimateHigh`, value)} />
-              <TextField label="Limite" value={item.limit} onChange={(value) => updateField(`objects[${objectIndex}].limit`, value)} />
-              <TextField label="Abb.-Kosten" value={item.abbCost} onChange={(value) => updateField(`objects[${objectIndex}].abbCost`, value)} />
+              <TextField className="span-two" label="Kurzbeschreibung" value={item.shortDesc} onChange={(value) => updateField(`objects[${objectIndex}].shortDesc`, value)} />
+              <TextField className="span-two" label="Beschreibung" value={item.desc} onChange={(value) => updateField(`objects[${objectIndex}].desc`, value)} textarea />
+              <NumberField label="Schaetzung von" value={item.estimateLow} onChange={(value) => updateField(`objects[${objectIndex}].estimateLow`, value)} />
+              <NumberField label="Schaetzung bis" value={item.estimateHigh} onChange={(value) => updateField(`objects[${objectIndex}].estimateHigh`, value)} />
+              <NumberField label={limitLabel} value={item.limit} onChange={(value) => updateField(`objects[${objectIndex}].limit`, value)} />
+              <CheckboxField label="Nettolimite" checked={item.netLimit} onChange={(value) => updateField(`objects[${objectIndex}].netLimit`, value)} disabled={isIbid} />
+              {isIbid ? <p className="field-help span-two">Bei ibid-Objekten ist keine Nettolimite erlaubt. Das Feld wird als Startpreis ausgegeben.</p> : null}
+              <NumberField label="Abb.-Kosten" value={item.abbCost} onChange={(value) => updateField(`objects[${objectIndex}].abbCost`, value)} />
               <TextField label="Referenznr." value={item.received} onChange={(value) => updateField(`objects[${objectIndex}].received`, value)} />
               <TextField label="Bemerkungen" value={item.remarks} onChange={(value) => updateField(`objects[${objectIndex}].remarks`, value)} textarea />
-              <CheckboxField label="Nettolimite" checked={item.netLimit} onChange={(value) => updateField(`objects[${objectIndex}].netLimit`, value)} />
               <div className="field photo-field">
                 <span>Fotos</span>
                 <label className="file-button">
@@ -420,10 +567,9 @@ const ObjectEditor = ({ record, masterData, inModal = false, selectedObjectId }:
                 </label>
                 <div className="photo-grid">
                   {item.photos.map((photo) => (
-                    <div key={photo.id} className="photo-thumb">
+                    <div key={photo.id} className="passport-preview">
                       <img src={photo.dataUrl} alt={photo.name} />
-                      <small>{photo.name}</small>
-                      <button type="button" className="ghost-button" onClick={() => removePhoto(item.id, photo.id)}>Entfernen</button>
+                      <button type="button" className="photo-remove" onClick={() => removePhoto(item.id, photo.id)} aria-label="Foto entfernen">x</button>
                     </div>
                   ))}
                 </div>
@@ -435,12 +581,12 @@ const ObjectEditor = ({ record, masterData, inModal = false, selectedObjectId }:
 
       {!selectedObjectId ? (
         <SectionCard title="Konditionen" description="Diese Konditionen gelten fuer alle Objekte des Vorgangs">
-          <TextField label="Kommission" value={record.costs.kommission} onChange={(value) => updateField('costs.kommission', value)} />
-          <TextField label="Versicherung" value={record.costs.versicherung} onChange={(value) => updateField('costs.versicherung', value)} />
-          <TextField label="Transport" value={record.costs.transport} onChange={(value) => updateField('costs.transport', value)} />
-          <TextField label="Abb.-Kosten" value={record.costs.abbKosten} onChange={(value) => updateField('costs.abbKosten', value)} />
-          <TextField label="Kosten Expertisen" value={record.costs.kostenExpertisen} onChange={(value) => updateField('costs.kostenExpertisen', value)} />
-          <TextField label="Internet" value={record.costs.internet} onChange={(value) => updateField('costs.internet', value)} />
+          <NumberField label="Kommission" value={record.costs.kommission} onChange={(value) => updateField('costs.kommission', value)} />
+          <NumberField label="Versicherung" value={record.costs.versicherung} onChange={(value) => updateField('costs.versicherung', value)} />
+          <NumberField label="Transport" value={record.costs.transport} onChange={(value) => updateField('costs.transport', value)} />
+          <NumberField label="Abb.-Kosten" value={record.costs.abbKosten} onChange={(value) => updateField('costs.abbKosten', value)} />
+          <NumberField label="Kosten Expertisen" value={record.costs.kostenExpertisen} onChange={(value) => updateField('costs.kostenExpertisen', value)} />
+          <NumberField label="Internet" value={record.costs.internet} onChange={(value) => updateField('costs.internet', value)} />
           <CheckboxField label="Alle Kosten nur bei Erfolg" checked={record.costs.onlyIfSuccess} onChange={(value) => updateField('costs.onlyIfSuccess', value)} />
           <TextField label="Provenienz / Diverses" value={record.costs.provenance} onChange={(value) => updateField('costs.provenance', value)} textarea />
         </SectionCard>
@@ -455,7 +601,7 @@ const InterneInfosPage = ({ record, masterData }: { record: CaseRecord; masterDa
   return (
     <div className="page-stack">
       <SectionCard title="Interne Notizen">
-        <TextField label="Notiz" value={record.internalInfo.note} onChange={(value) => updateField('internalInfo.note', value)} textarea />
+        <TextField className="span-two" label="Notiz" value={record.internalInfo.note} onChange={(value) => updateField('internalInfo.note', value)} textarea />
       </SectionCard>
       <SectionCard title="Interessengebiete" description="Mehrfachauswahl aus der zentralen Stammdatenliste">
         <MultiSelectField label="Interessengebiete" values={record.internalInfo.interestIds} onChange={(values) => updateField('internalInfo.interestIds', values)} options={masterData.departments.map((department) => ({ value: department.id, label: `${department.code} - ${department.name}` }))} />
@@ -481,21 +627,25 @@ const RenderedPreviewSurface = ({
     const renderPages = async () => {
       const pdfBytes = await pdfFactory()
       const pdf = await getDocument({ data: pdfBytes }).promise
-      const nextImages: string[] = []
+        const nextImages: string[] = []
 
-      for (let pageIndex = 0; pageIndex < pdf.numPages; pageIndex += 1) {
-        const pdfPage = await pdf.getPage(pageIndex + 1)
-        const viewport = pdfPage.getViewport({ scale: 1.7 })
-        const canvas = document.createElement('canvas')
-        const context = canvas.getContext('2d')
-        if (!context) {
-          continue
+        for (let pageIndex = 0; pageIndex < pdf.numPages; pageIndex += 1) {
+          const pdfPage = await pdf.getPage(pageIndex + 1)
+          const deviceScale = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1
+          const renderScale = Math.max(2.4, deviceScale * 2)
+          const viewport = pdfPage.getViewport({ scale: renderScale })
+          const canvas = document.createElement('canvas')
+          const context = canvas.getContext('2d')
+          if (!context) {
+            continue
+          }
+          context.imageSmoothingEnabled = true
+          context.imageSmoothingQuality = 'high'
+          canvas.width = viewport.width
+          canvas.height = viewport.height
+          await pdfPage.render({ canvas, canvasContext: context, viewport }).promise
+          nextImages.push(canvas.toDataURL('image/png'))
         }
-        canvas.width = viewport.width
-        canvas.height = viewport.height
-        await pdfPage.render({ canvas, canvasContext: context, viewport }).promise
-        nextImages.push(canvas.toDataURL('image/png'))
-      }
 
       if (active) {
         setImages(nextImages)
@@ -538,8 +688,126 @@ const RenderedPreviewSurface = ({
   )
 }
 
+const WordDocxPreviewSurface = ({
+  docxFactory,
+}: {
+  docxFactory: () => Promise<Blob>
+}) => {
+  const hostRef = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    let active = true
+    let resizeObserver: ResizeObserver | null = null
+
+    const fitPages = () => {
+      const host = hostRef.current
+      if (!host) {
+        return
+      }
+      const pages = Array.from(host.querySelectorAll<HTMLElement>('.docx'))
+      const availableWidth = host.clientWidth - 24
+      pages.forEach((page) => {
+        page.style.transform = ''
+        page.style.transformOrigin = 'top center'
+        page.style.marginBottom = '18px'
+        const pageWidth = page.scrollWidth
+        if (!pageWidth || pageWidth <= availableWidth) {
+          page.style.height = ''
+          return
+        }
+        const scale = availableWidth / pageWidth
+        page.style.transform = `scale(${scale})`
+        page.style.height = `${page.scrollHeight * scale}px`
+      })
+    }
+
+    const renderDocx = async () => {
+      const host = hostRef.current
+      if (!host) {
+        return
+      }
+      host.innerHTML = ''
+      await loadScript('/vendor/jszip.min.js')
+      await loadScript('/vendor/docx-preview.js')
+      const blob = await docxFactory()
+      if (!active) {
+        return
+      }
+      const renderer = (window as Window & { docx?: { renderAsync?: (data: Blob, bodyContainer: HTMLElement, styleContainer?: HTMLElement, options?: Record<string, unknown>) => Promise<void> } }).docx?.renderAsync
+      if (!renderer) {
+        throw new Error('docx-preview konnte nicht initialisiert werden.')
+      }
+      await renderer(blob, host, undefined, {
+        className: 'word-docx-preview',
+        inWrapper: true,
+        breakPages: true,
+        ignoreWidth: false,
+        ignoreHeight: false,
+      })
+      fitPages()
+      if (typeof ResizeObserver !== 'undefined') {
+        resizeObserver = new ResizeObserver(() => fitPages())
+        resizeObserver.observe(host)
+      }
+    }
+
+    void renderDocx()
+
+    return () => {
+      active = false
+      resizeObserver?.disconnect()
+    }
+  }, [docxFactory])
+
+  return <div ref={hostRef} className="docx-preview-host" />
+}
+
+const clearSignatureCanvas = (canvas: HTMLCanvasElement, context: CanvasRenderingContext2D) => {
+  context.clearRect(0, 0, canvas.width, canvas.height)
+  context.strokeStyle = '#0f172a'
+  context.lineWidth = 2.4
+  context.lineJoin = 'round'
+  context.lineCap = 'round'
+}
+
+const getCanvasPoint = (canvas: HTMLCanvasElement, event: React.PointerEvent<HTMLCanvasElement>) => {
+  const rect = canvas.getBoundingClientRect()
+  const scaleX = canvas.width / rect.width
+  const scaleY = canvas.height / rect.height
+  return {
+    x: (event.clientX - rect.left) * scaleX,
+    y: (event.clientY - rect.top) * scaleY,
+  }
+}
+
+const drawSignaturePreview = (canvas: HTMLCanvasElement, context: CanvasRenderingContext2D, value: string) => {
+  clearSignatureCanvas(canvas, context)
+  if (!value) {
+    return
+  }
+  const image = new Image()
+  image.onload = () => {
+    const padding = 12
+    const scale = Math.min(
+      (canvas.width - padding * 2) / image.width,
+      (canvas.height - padding * 2) / image.height,
+    )
+    const width = image.width * scale
+    const height = image.height * scale
+    context.drawImage(
+      image,
+      (canvas.width - width) / 2,
+      (canvas.height - height) / 2,
+      width,
+      height,
+    )
+  }
+  image.src = value
+}
+
 const SignaturePad = ({ value, onChange }: { value: string; onChange: (value: string) => void }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
+  const internalUpdateRef = useRef(false)
   const [drawing, setDrawing] = useState(false)
 
   useEffect(() => {
@@ -548,17 +816,11 @@ const SignaturePad = ({ value, onChange }: { value: string; onChange: (value: st
     if (!canvas || !context) {
       return
     }
-    context.fillStyle = '#f8f3e7'
-    context.fillRect(0, 0, canvas.width, canvas.height)
-    context.strokeStyle = '#0f172a'
-    context.lineWidth = 2
-    context.lineJoin = 'round'
-    context.lineCap = 'round'
-    if (value) {
-      const image = new Image()
-      image.onload = () => context.drawImage(image, 0, 0, canvas.width, canvas.height)
-      image.src = value
+    if (internalUpdateRef.current) {
+      internalUpdateRef.current = false
+      return
     }
+    drawSignaturePreview(canvas, context, value)
   }, [value])
 
   const updateFromCanvas = () => {
@@ -566,116 +828,187 @@ const SignaturePad = ({ value, onChange }: { value: string; onChange: (value: st
     if (!canvas) {
       return
     }
+    internalUpdateRef.current = true
     onChange(canvas.toDataURL('image/png'))
   }
 
   return (
     <div className="signature-pad">
-      <canvas
-        ref={canvasRef}
-        width={520}
-        height={160}
-        onPointerDown={(event) => {
+        <canvas
+          ref={canvasRef}
+          width={520}
+          height={160}
+          onPointerDown={(event) => {
+            const canvas = canvasRef.current
+            const context = canvas?.getContext('2d')
+            if (!canvas || !context) {
+              return
+            }
+            const point = getCanvasPoint(canvas, event)
+            context.beginPath()
+            context.moveTo(point.x, point.y)
+            context.lineTo(point.x, point.y)
+            context.stroke()
+            canvas.setPointerCapture(event.pointerId)
+            setDrawing(true)
+          }}
+          onPointerMove={(event) => {
+            if (!drawing) {
+              return
+          }
           const canvas = canvasRef.current
-          const context = canvas?.getContext('2d')
-          if (!canvas || !context) {
-            return
-          }
-          const rect = canvas.getBoundingClientRect()
-          context.beginPath()
-          context.moveTo(event.clientX - rect.left, event.clientY - rect.top)
-          setDrawing(true)
-        }}
-        onPointerMove={(event) => {
-          if (!drawing) {
-            return
-          }
-          const canvas = canvasRef.current
-          const context = canvas?.getContext('2d')
-          if (!canvas || !context) {
-            return
-          }
-          const rect = canvas.getBoundingClientRect()
-          context.lineTo(event.clientX - rect.left, event.clientY - rect.top)
-          context.stroke()
-        }}
-        onPointerUp={() => {
-          setDrawing(false)
-          updateFromCanvas()
-        }}
-        onPointerLeave={() => {
-          if (drawing) {
+            const context = canvas?.getContext('2d')
+            if (!canvas || !context) {
+              return
+            }
+            const point = getCanvasPoint(canvas, event)
+            context.lineTo(point.x, point.y)
+            context.stroke()
+          }}
+          onPointerUp={(event) => {
+            const canvas = canvasRef.current
             setDrawing(false)
+            canvas?.releasePointerCapture(event.pointerId)
             updateFromCanvas()
+          }}
+          onPointerLeave={(event) => {
+            if (drawing) {
+              const canvas = canvasRef.current
+              setDrawing(false)
+              canvas?.releasePointerCapture(event.pointerId)
+              updateFromCanvas()
+            }
+          }}
+        />
+        <div className="inline-actions"><button type="button" className="secondary-button" onClick={() => {
+          const canvas = canvasRef.current
+          const context = canvas?.getContext('2d')
+          if (!canvas || !context) {
+            return
           }
-        }}
-      />
-      <div className="inline-actions"><button type="button" className="secondary-button" onClick={() => {
-        const canvas = canvasRef.current
-        const context = canvas?.getContext('2d')
-        if (!canvas || !context) {
-          return
-        }
-        context.fillStyle = '#f8f3e7'
-        context.fillRect(0, 0, canvas.width, canvas.height)
-        onChange('')
-      }}>Leeren</button></div>
-    </div>
-  )
-}
+          internalUpdateRef.current = false
+          clearSignatureCanvas(canvas, context)
+          onChange('')
+        }}>Leeren</button></div>
+      </div>
+    )
+  }
 const SectionEditorModal = ({ target, record, masterData, onClose }: { target: SectionEditorTarget; record: CaseRecord; masterData: MasterData; onClose: () => void }) => {
   const updateField = useAppStore((state) => state.updateField)
+  const addObject = useAppStore((state) => state.addObject)
+  const beneficiaryName = getEffectiveBeneficiary(record)
+  const companySelected = record.consignor.captureCompanyAddress
+  const currentClerk = masterData.clerks.find((entry) => entry.id === record.clerkId)
+  const [activeObjectId, setActiveObjectId] = useState(target.type === 'object' ? target.objectId : '')
+
+  const handleAddObjectFromModal = () => {
+    if (target.type !== 'object') {
+      return
+    }
+    const lastObject = record.objects.at(-1)
+    const nextObjectId = addObject({
+      auctionId: lastObject?.auctionId ?? '',
+      departmentId: lastObject?.departmentId ?? '',
+    })
+    if (nextObjectId) {
+      setActiveObjectId(nextObjectId)
+    }
+  }
 
   return (
     <div className="overlay">
-      <div className="overlay-card wide">
-        <div className="modal-header">
-          <div><p className="eyebrow">Vorschau-Modal</p><h2>Felder bearbeiten</h2></div>
-          <button type="button" className="ghost-button" onClick={onClose}>Schliessen</button>
-        </div>
+        <div className="overlay-card wide">
+          <div className="modal-header">
+            <div><p className="eyebrow">Vorschau-Modal</p><h2>Felder bearbeiten</h2></div>
+            <div className="inline-actions">
+              {target.type === 'object' ? (
+                <button type="button" className="secondary-button" onClick={handleAddObjectFromModal}>Objekt hinzufuegen</button>
+              ) : null}
+              <button type="button" className="ghost-button" onClick={onClose}>Schließen/Übernehmen</button>
+            </div>
+          </div>
 
         {target.type === 'consignor' ? (
           <div className="field-grid">
+            <CheckboxField label="Firmenadresse" checked={record.consignor.captureCompanyAddress} onChange={(value) => updateField('consignor.captureCompanyAddress', value)} />
+            <SelectField label="Anrede" value={record.consignor.title} onChange={(value) => updateField('consignor.title', value)} options={masterData.titles.map((title) => ({ value: title, label: title }))} />
             <TextField label="Vorname" value={record.consignor.firstName} onChange={(value) => updateField('consignor.firstName', value)} />
             <TextField label="Nachname" value={record.consignor.lastName} onChange={(value) => updateField('consignor.lastName', value)} />
-            <TextField label="Firma" value={record.consignor.company} onChange={(value) => updateField('consignor.company', value)} />
+            {companySelected ? <TextField className="span-two" label="Firma" value={record.consignor.company} onChange={(value) => updateField('consignor.company', value)} /> : null}
+            <TextField label="Adresszusatz" value={record.consignor.addressAddon1} onChange={(value) => updateField('consignor.addressAddon1', value)} />
             <TextField label="Strasse" value={record.consignor.street} onChange={(value) => updateField('consignor.street', value)} />
             <TextField label="Hausnummer" value={record.consignor.houseNo} onChange={(value) => updateField('consignor.houseNo', value)} />
             <TextField label="PLZ" value={record.consignor.zip} onChange={(value) => updateField('consignor.zip', value)} />
             <TextField label="Stadt" value={record.consignor.city} onChange={(value) => updateField('consignor.city', value)} />
+            <TextField label="Land" value={record.consignor.country} onChange={(value) => updateField('consignor.country', value)} />
             <TextField label="E-Mail" value={record.consignor.email} onChange={(value) => updateField('consignor.email', value)} />
             <TextField label="Telefon" value={record.consignor.phone} onChange={(value) => updateField('consignor.phone', value)} />
+            <TextField label="Geburtsdatum" type="date" value={record.consignor.birthdate} onChange={(value) => updateField('consignor.birthdate', value)} />
+            <TextField label="Nationalität" value={record.consignor.nationality} onChange={(value) => updateField('consignor.nationality', value)} />
+            <TextField label="ID-/Passnummer" value={record.consignor.passportNo} onChange={(value) => updateField('consignor.passportNo', value)} />
+          </div>
+        ) : null}
+
+        {target.type === 'clerk' ? (
+          <div className="field-grid single-column">
+            <TextField label="Sachbearbeiter" value={currentClerk?.name ?? ''} onChange={() => undefined} readOnly />
+            <TextField label="Telefon" value={currentClerk?.phone ?? ''} onChange={() => undefined} readOnly />
+            <TextField label="E-Mail" value={currentClerk?.email ?? ''} onChange={() => undefined} readOnly />
           </div>
         ) : null}
 
         {target.type === 'owner' ? (
           <div className="field-grid">
-            <CheckboxField label="Eigentuemer entspricht Einlieferer" checked={record.owner.sameAsConsignor} onChange={(value) => updateField('owner.sameAsConsignor', value)} />
-            <TextField label="Vorname" value={record.owner.firstName} onChange={(value) => updateField('owner.firstName', value)} />
-            <TextField label="Nachname" value={record.owner.lastName} onChange={(value) => updateField('owner.lastName', value)} />
-            <TextField label="Strasse" value={record.owner.street} onChange={(value) => updateField('owner.street', value)} />
-            <TextField label="PLZ" value={record.owner.zip} onChange={(value) => updateField('owner.zip', value)} />
-            <TextField label="Stadt" value={record.owner.city} onChange={(value) => updateField('owner.city', value)} />
+            <CheckboxField label="Eigentümer entspricht Einlieferer" checked={record.owner.sameAsConsignor} onChange={(value) => updateField('owner.sameAsConsignor', value)} />
+            {!record.owner.sameAsConsignor ? (
+              <>
+                <TextField label="Vorname" value={record.owner.firstName} onChange={(value) => updateField('owner.firstName', value)} />
+                <TextField label="Nachname" value={record.owner.lastName} onChange={(value) => updateField('owner.lastName', value)} />
+                <TextField label="Strasse" value={record.owner.street} onChange={(value) => updateField('owner.street', value)} />
+                <TextField label="Hausnummer" value={record.owner.houseNo} onChange={(value) => updateField('owner.houseNo', value)} />
+                <TextField label="PLZ" value={record.owner.zip} onChange={(value) => updateField('owner.zip', value)} />
+                <TextField label="Stadt" value={record.owner.city} onChange={(value) => updateField('owner.city', value)} />
+                <TextField label="Land" value={record.owner.country} onChange={(value) => updateField('owner.country', value)} />
+              </>
+            ) : null}
           </div>
         ) : null}
 
         {target.type === 'bank' ? (
           <div className="field-grid">
-            <TextField label="Beguenstigter" value={record.bank.beneficiary} onChange={(value) => updateField('bank.beneficiary', value)} />
+            <TextField label="Begünstigter" value={beneficiaryName} onChange={() => undefined} readOnly help="Automatisch zusammengesetzt." />
             <TextField label="IBAN" value={record.bank.iban} onChange={(value) => updateField('bank.iban', value)} />
             <TextField label="BIC" value={record.bank.bic} onChange={(value) => updateField('bank.bic', value)} />
-            <TextField label="Grund" value={record.bank.diffReason} onChange={(value) => updateField('bank.diffReason', value)} textarea />
+            <CheckboxField label="Abweichender Begünstigter" checked={record.bank.diffBeneficiary} onChange={(value) => updateField('bank.diffBeneficiary', value)} />
+            {record.bank.diffBeneficiary ? (
+              <>
+                <TextField
+                  label="Grund"
+                  value={record.bank.diffReason}
+                  onChange={(value) => updateField('bank.diffReason', value)}
+                  textarea
+                  help={!record.bank.diffReason.trim() ? 'Grund fehlt noch.' : undefined}
+                  title={!record.bank.diffReason.trim() ? 'Bitte Grund erfassen, damit der Name aktiviert wird.' : undefined}
+                />
+                <TextField
+                  label="Name abweichender Begünstigter"
+                  value={record.bank.diffBeneficiaryName}
+                  onChange={(value) => updateField('bank.diffBeneficiaryName', value)}
+                  disabled={!record.bank.diffReason.trim()}
+                />
+              </>
+            ) : null}
           </div>
         ) : null}
 
         {target.type === 'costs' ? (
           <div className="field-grid">
-            <TextField label="Kommission" value={record.costs.kommission} onChange={(value) => updateField('costs.kommission', value)} />
-            <TextField label="Versicherung" value={record.costs.versicherung} onChange={(value) => updateField('costs.versicherung', value)} />
-            <TextField label="Transport" value={record.costs.transport} onChange={(value) => updateField('costs.transport', value)} />
-            <TextField label="Abb.-Kosten" value={record.costs.abbKosten} onChange={(value) => updateField('costs.abbKosten', value)} />
-            <TextField label="Kosten Expertisen" value={record.costs.kostenExpertisen} onChange={(value) => updateField('costs.kostenExpertisen', value)} />
-            <TextField label="Internet" value={record.costs.internet} onChange={(value) => updateField('costs.internet', value)} />
+            <NumberField label="Kommission" value={record.costs.kommission} onChange={(value) => updateField('costs.kommission', value)} />
+            <NumberField label="Versicherung" value={record.costs.versicherung} onChange={(value) => updateField('costs.versicherung', value)} />
+            <NumberField label="Transport" value={record.costs.transport} onChange={(value) => updateField('costs.transport', value)} />
+            <NumberField label="Abb.-Kosten" value={record.costs.abbKosten} onChange={(value) => updateField('costs.abbKosten', value)} />
+            <NumberField label="Kosten Expertisen" value={record.costs.kostenExpertisen} onChange={(value) => updateField('costs.kostenExpertisen', value)} />
+            <NumberField label="Internet" value={record.costs.internet} onChange={(value) => updateField('costs.internet', value)} />
             <CheckboxField label="Alle Kosten nur bei Erfolg" checked={record.costs.onlyIfSuccess} onChange={(value) => updateField('costs.onlyIfSuccess', value)} />
             <TextField label="Provenienz / Diverses" value={record.costs.provenance} onChange={(value) => updateField('costs.provenance', value)} textarea />
           </div>
@@ -683,12 +1016,12 @@ const SectionEditorModal = ({ target, record, masterData, onClose }: { target: S
 
         {target.type === 'internal' ? (
           <div className="field-grid">
-            <TextField label="Interne Notiz" value={record.internalInfo.note} onChange={(value) => updateField('internalInfo.note', value)} textarea />
+            <TextField className="span-two" label="Interne Notiz" value={record.internalInfo.note} onChange={(value) => updateField('internalInfo.note', value)} textarea />
             <MultiSelectField label="Interessengebiete" values={record.internalInfo.interestIds} onChange={(values) => updateField('internalInfo.interestIds', values)} options={masterData.departments.map((department) => ({ value: department.id, label: `${department.code} - ${department.name}` }))} />
           </div>
         ) : null}
 
-        {target.type === 'object' ? <ObjectEditor record={record} masterData={masterData} inModal selectedObjectId={target.objectId} /> : null}
+        {target.type === 'object' ? <ObjectEditor record={record} masterData={masterData} inModal selectedObjectId={activeObjectId} /> : null}
         {target.type === 'signature' ? <div className="field-grid single-column"><p>Canvas-Unterschrift fuer das finale ELB-PDF.</p><SignaturePad value={record.signatures.consignorPng} onChange={(value) => updateField('signatures.consignorPng', value)} /></div> : null}
       </div>
     </div>
@@ -726,8 +1059,6 @@ const PdfPreviewPage = ({ record, masterData, onEdit }: { record: CaseRecord; ma
   const data = useAppStore((state) => state.data)
   const [missingFields, setMissingFields] = useState<MissingFieldEntry[] | null>(null)
   const pages = useMemo(() => buildPdfPreviewPages(record, masterData), [record, masterData])
-  const wordPreviewPages = useMemo(() => buildWordPreviewPages(record, masterData), [record, masterData])
-
   const handleExport = async () => {
     const missing = resolveMissingFields(record, data.pdfRequiredFields)
     if (missing.length) {
@@ -755,7 +1086,7 @@ const PdfPreviewPage = ({ record, masterData, onEdit }: { record: CaseRecord; ma
             <button type="button" className="secondary-button" onClick={() => onEdit({ type: 'signature' })}>Einlieferer unterschreiben</button>
             <button type="button" className="primary-button" onClick={() => void handleExport()}>Definitives ELB-PDF exportieren</button>
             <button type="button" className="secondary-button" onClick={() => void downloadObjectsPdf(record, masterData)}>Zusatz-PDF mit Objekten</button>
-            <button type="button" className="secondary-button" onClick={() => void exportAllArtifacts(record, masterData, wordPreviewPages)}>Finales ZIP erzeugen</button>
+            <button type="button" className="secondary-button" onClick={() => void exportAllArtifacts(record, masterData)}>Finales ZIP erzeugen</button>
           </div>
         </section>
       </div>
@@ -782,24 +1113,15 @@ const PdfPreviewPage = ({ record, masterData, onEdit }: { record: CaseRecord; ma
 }
 
 const WordPreviewPage = ({ record, masterData, onEdit }: { record: CaseRecord; masterData: MasterData; onEdit: (target: SectionEditorTarget) => void }) => {
-  const pages = useMemo(() => buildWordPreviewPages(record, masterData), [record, masterData])
-
   return (
-    <div className="preview-stack">
-      <RenderedPreviewSurface
-        pages={pages}
-        pdfFactory={() => buildWordPdf(pages)}
-        onFieldClick={(editKey) => {
-          const target = editTargetFromKey(editKey)
-          if (target) {
-            onEdit(target)
-          }
-        }}
-      />
+    <div className="preview-stack word-preview-stack">
+      <WordDocxPreviewSurface docxFactory={() => buildWordDocx(record, masterData)} />
       <section className="card preview-actions-card">
         <div className="action-row">
+          <button type="button" className="secondary-button" onClick={() => onEdit({ type: 'consignor' })}>Einlieferer bearbeiten</button>
+          <button type="button" className="secondary-button" onClick={() => onEdit({ type: 'object', objectId: record.objects[0]?.id ?? '' })} disabled={!record.objects.length}>Objekte bearbeiten</button>
           <button type="button" className="primary-button" onClick={() => void downloadWordDocx(record, masterData)}>Definitive DOCX-Datei</button>
-          <button type="button" className="secondary-button" onClick={() => void downloadWordPdf(pages, record.meta.receiptNo)}>PDF aus Word-Vorschau</button>
+          <button type="button" className="secondary-button" onClick={() => void downloadWordPdf(record, masterData, record.meta.receiptNo)}>PDF aus Word-Vorschau</button>
         </div>
       </section>
     </div>
@@ -982,7 +1304,15 @@ function App() {
       <StartOverlay />
       <AdminPanel />
       {casesOpen ? <CaseListModal activeCase={activeCase} onClose={() => setCasesOpen(false)} /> : null}
-      {activeCase && sectionEditor ? <SectionEditorModal target={sectionEditor} record={activeCase} masterData={data.masterData} onClose={() => setSectionEditor(null)} /> : null}
+      {activeCase && sectionEditor ? (
+        <SectionEditorModal
+          key={sectionEditor.type === 'object' ? `object-${sectionEditor.objectId}` : sectionEditor.type}
+          target={sectionEditor}
+          record={activeCase}
+          masterData={data.masterData}
+          onClose={() => setSectionEditor(null)}
+        />
+      ) : null}
 
       <header className="topbar">
         <div><p className="eyebrow">ELB Erfassung</p><h1>Desktop Phase 1</h1></div>

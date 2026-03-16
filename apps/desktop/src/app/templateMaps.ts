@@ -1,31 +1,86 @@
 import type { CaseRecord, MasterData, PreviewPage } from './types'
+import { getEffectiveBeneficiary } from './format'
+
+const PDF_OBJECT_MAX_UNITS_PER_PAGE = 28
+const PDF_OBJECT_GAP_UNITS = 2
+
+const normalizeVisibleContent = (value: string) =>
+  value
+    .replaceAll('Erhalten fÃ¼r', 'Erhalten für')
+    .replaceAll('Beguenstigter', 'Begünstigter')
+    .replaceAll('Nationalitaet', 'Nationalität')
 
 const getDepartmentLabel = (masterData: MasterData, departmentId: string) =>
   masterData.departments.find((entry) => entry.id === departmentId)?.name ?? ''
 
-const rect = (x: number, y: number, w: number, h: number) => ({ x, y, w, h })
+const getDepartmentCode = (masterData: MasterData, departmentId: string) =>
+  masterData.departments.find((entry) => entry.id === departmentId)?.code ?? ''
 
-export const pdfExportAnchors = {
-  receiptNo: { x: 0.71, y: 0.92, size: 12 },
-  date: { x: 0.71, y: 0.89, size: 11 },
-  clerk: { x: 0.11, y: 0.89, size: 11 },
-  consignorName: { x: 0.11, y: 0.81, size: 12 },
-  consignorCompany: { x: 0.11, y: 0.792, size: 11 },
-  consignorStreet: { x: 0.11, y: 0.775, size: 11 },
-  consignorCity: { x: 0.11, y: 0.745, size: 11 },
-  iban: { x: 0.11, y: 0.39, size: 10 },
-  bic: { x: 0.11, y: 0.365, size: 10 },
-  beneficiary: { x: 0.11, y: 0.34, size: 10 },
-  kommission: { x: 0.68, y: 0.39, size: 10 },
-  versicherung: { x: 0.68, y: 0.365, size: 10 },
-  transport: { x: 0.68, y: 0.34, size: 10 },
-  notes: { x: 0.11, y: 0.27, width: 0.75, lineHeight: 13, size: 10 },
-  objectRowStartY: 0.63,
-  objectRowHeight: 22,
-  objectDescX: 0.11,
-  objectEstimateX: 0.66,
-  signature: { x: 0.58, y: 0.11, width: 140, height: 55 },
-} as const
+const isIbidObject = (masterData: MasterData, auctionId: string) =>
+  (masterData.auctions.find((entry) => entry.id === auctionId)?.number ?? '').toLowerCase().startsWith('ibid')
+
+const buildPdfObjectPreviewEntries = (record: CaseRecord, masterData: MasterData) =>
+  record.objects.map((item, index) => {
+    const detailLines = [
+      item.shortDesc || '-',
+      ...(item.desc.trim() ? [item.desc.trim()] : []),
+      ...(item.received.trim() ? [`Referenznr.: ${item.received.trim()}`] : []),
+      ...(item.remarks.trim() ? [`Bemerkungen: ${item.remarks.trim()}`] : []),
+    ]
+    const estimateLines = [
+      ...(item.estimateLow.trim() || item.estimateHigh.trim() ? [`${item.estimateLow || '-'} / ${item.estimateHigh || '-'}`] : []),
+      ...(item.limit.trim() ? [`${isIbidObject(masterData, item.auctionId) ? 'Startpreis' : item.netLimit ? 'Nettolimite' : 'Limite'}: ${item.limit.trim()}`] : []),
+    ]
+    const previewLines = [
+      `Int.-Nr.: ${item.intNo || '-'}`,
+      `Erhalten für: ${getAuctionWithDate(masterData, item.auctionId) || '-'}`,
+      `Abteilung: ${getDepartmentCode(masterData, item.departmentId) || '-'}`,
+      ...detailLines,
+      ...estimateLines,
+    ]
+
+    return {
+      id: `object-row-${item.id}`,
+      label: `Objekt ${index + 1}`,
+      value: normalizeVisibleContent(previewLines.join('\n')),
+      editKey: `object:${item.id}`,
+      lineUnits: detailLines.length + estimateLines.length + PDF_OBJECT_GAP_UNITS,
+    }
+  })
+
+const paginatePdfObjectPreviewEntries = (entries: ReturnType<typeof buildPdfObjectPreviewEntries>, maxUnitsPerPage: number) => {
+  const pages: typeof entries[] = []
+  let current: typeof entries = []
+  let used = 0
+
+  entries.forEach((entry) => {
+    if (current.length && used + entry.lineUnits > maxUnitsPerPage) {
+      pages.push(current)
+      current = []
+      used = 0
+    }
+    current.push(entry)
+    used += entry.lineUnits
+  })
+
+  if (current.length) {
+    pages.push(current)
+  }
+
+  return pages
+}
+
+const getAuctionWithDate = (masterData: MasterData, auctionId: string) => {
+  const auction = masterData.auctions.find((entry) => entry.id === auctionId)
+  if (!auction) {
+    return ''
+  }
+  const month = auction.month ? auction.month.padStart(2, '0') : '--'
+  const year = auction.year ? auction.year.slice(-2) : '--'
+  return `${auction.number}\n${month}/${year}`
+}
+
+const rect = (x: number, y: number, w: number, h: number) => ({ x, y, w, h })
 
 const pdfFieldRects = {
   clerk: rect(0.2647, 0.1071, 0.6633, 0.0137),
@@ -53,11 +108,64 @@ const pdfFieldRects = {
   notes: rect(0.1071, 0.6946, 0.8077, 0.0803),
 } as const
 
+const pdfOverflowFieldRects = {
+  objectEstimate: rect(0.7252, 0.1853, 0.1938, 0.4428),
+  objectShortDesc: rect(0.2868, 0.1853, 0.4302, 0.4428),
+  objectIntNo: rect(0.1038, 0.1853, 0.0398, 0.4428),
+  objectReceived: rect(0.1565, 0.1853, 0.0672, 0.4428),
+  objectDepartment: rect(0.2326, 0.1853, 0.0474, 0.4428),
+} as const
+
 export const buildPdfPreviewPages = (
   record: CaseRecord,
   masterData: MasterData,
-): PreviewPage[] => [
-  {
+): PreviewPage[] => {
+  const clerk = masterData.clerks.find((entry) => entry.id === record.clerkId)
+  const clerkLabel = [clerk?.name ?? '', clerk?.phone ?? '', clerk?.email ?? ''].filter(Boolean).join(' | ')
+  const ownerAddress = record.owner.sameAsConsignor
+    ? [
+        record.consignor.company,
+        `${record.consignor.title} ${record.consignor.firstName} ${record.consignor.lastName}`.trim(),
+        record.consignor.addressAddon1,
+        `${record.consignor.street} ${record.consignor.houseNo}`.trim(),
+        `${record.consignor.zip} ${record.consignor.city}`.trim(),
+        record.consignor.country,
+      ]
+    : [
+        `${record.owner.firstName} ${record.owner.lastName}`.trim(),
+        `${record.owner.street} ${record.owner.houseNo}`.trim(),
+        `${record.owner.zip} ${record.owner.city}`.trim(),
+        record.owner.country,
+      ]
+
+  const objectFields = (() => {
+    const objectEntries = paginatePdfObjectPreviewEntries(buildPdfObjectPreviewEntries(record, masterData), PDF_OBJECT_MAX_UNITS_PER_PAGE)[0] ?? []
+    if (!objectEntries.length) {
+      return []
+    }
+    const top = pdfFieldRects.objectIntNo.y
+    const totalHeight = pdfFieldRects.objectIntNo.h
+    const unitHeight = totalHeight / PDF_OBJECT_MAX_UNITS_PER_PAGE
+    let currentY = top
+
+    return objectEntries.map((entry) => {
+      const height = entry.lineUnits * unitHeight
+      const field = {
+        id: entry.id,
+        label: entry.label,
+        value: entry.value,
+        editKey: entry.editKey,
+        x: pdfFieldRects.objectIntNo.x,
+        y: currentY,
+        w: pdfFieldRects.objectEstimate.x + pdfFieldRects.objectEstimate.w - pdfFieldRects.objectIntNo.x,
+        h: Math.max(height - unitHeight * 0.1, unitHeight),
+      }
+      currentY += height
+      return field
+    })
+  })()
+
+  return [{
     id: 'pdf-1',
     title: 'ELB-PDF Seite 1',
     subtitle: 'Vorschau mit Einlieferer- und Objektangaben',
@@ -74,8 +182,8 @@ export const buildPdfPreviewPages = (
       {
         id: 'clerk',
         label: 'Sachbearbeiter',
-        value: masterData.clerks.find((entry) => entry.id === record.clerkId)?.name ?? '',
-        editKey: 'consignor',
+        value: clerkLabel,
+        editKey: 'clerk',
         ...pdfFieldRects.clerk,
       },
       {
@@ -105,12 +213,7 @@ export const buildPdfPreviewPages = (
       {
         id: 'owner-address',
         label: 'Briefadresse EG',
-        value: [
-          `${record.owner.firstName} ${record.owner.lastName}`.trim(),
-          `${record.owner.street} ${record.owner.houseNo}`.trim(),
-          `${record.owner.zip} ${record.owner.city}`.trim(),
-          record.owner.country,
-        ]
+        value: ownerAddress
           .filter(Boolean)
           .join('\n'),
         editKey: 'owner',
@@ -119,7 +222,7 @@ export const buildPdfPreviewPages = (
       {
         id: 'iban',
         label: 'IBAN',
-        value: record.bank.iban,
+        value: `IBAN/Kontonr: ${record.bank.iban || '-'}`,
         path: 'bank.iban',
         editKey: 'bank',
         ...pdfFieldRects.iban,
@@ -127,31 +230,30 @@ export const buildPdfPreviewPages = (
       {
         id: 'bic',
         label: 'BIC',
-        value: record.bank.bic,
+        value: `BIC/SWIFT: ${record.bank.bic || '-'}`,
         path: 'bank.bic',
         editKey: 'bank',
         ...pdfFieldRects.bic,
       },
       {
         id: 'beneficiary',
-        label: 'Beguenstigter',
-        value: record.bank.beneficiary,
-        path: 'bank.beneficiary',
+        label: 'Begünstigter',
+        value: `Begünstigter: ${getEffectiveBeneficiary(record) || '-'}`,
         editKey: 'bank',
         ...pdfFieldRects.beneficiary,
       },
       {
         id: 'birthdate',
         label: 'Geburtsdatum',
-        value: record.consignor.birthdate,
+        value: `Geburtsdatum: ${record.consignor.birthdate || '-'}`,
         path: 'consignor.birthdate',
         editKey: 'consignor',
         ...pdfFieldRects.birthdate,
       },
       {
         id: 'nationality',
-        label: 'Nationalitaet',
-        value: record.consignor.nationality,
+        label: 'Nationalität',
+        value: `Nationalität: ${record.consignor.nationality || '-'}`,
         path: 'consignor.nationality',
         editKey: 'consignor',
         ...pdfFieldRects.nationality,
@@ -159,7 +261,7 @@ export const buildPdfPreviewPages = (
       {
         id: 'passport',
         label: 'ID / Pass',
-        value: record.consignor.passportNo,
+        value: `ID/Passnummer: ${record.consignor.passportNo || '-'}`,
         path: 'consignor.passportNo',
         editKey: 'consignor',
         ...pdfFieldRects.passportNo,
@@ -205,6 +307,14 @@ export const buildPdfPreviewPages = (
         ...pdfFieldRects.kosten,
       },
       {
+        id: 'provenienz',
+        label: 'Provenienz / Diverses',
+        value: record.costs.provenance,
+        path: 'costs.provenance',
+        editKey: 'costs',
+        ...pdfFieldRects.notes,
+      },
+      {
         id: 'internet',
         label: 'Internet',
         value: record.costs.internet,
@@ -212,56 +322,40 @@ export const buildPdfPreviewPages = (
         editKey: 'costs',
         ...pdfFieldRects.internet,
       },
-      {
-        id: 'notes',
-        label: 'Interne Notizen',
-        value: record.internalInfo.note,
-        path: 'internalInfo.note',
-        editKey: 'internal',
-        ...pdfFieldRects.notes,
-      },
-      ...(record.objects[0]
-        ? [
-            {
-              id: `obj-int-${record.objects[0].id}`,
-              label: 'Int.-Nr. 1',
-              value: record.objects[0].intNo,
-              editKey: `object:${record.objects[0].id}`,
-              ...pdfFieldRects.objectIntNo,
-            },
-            {
-              id: `obj-rec-${record.objects[0].id}`,
-              label: 'Erhalten 1',
-              value: record.objects[0].received,
-              editKey: `object:${record.objects[0].id}`,
-              ...pdfFieldRects.objectReceived,
-            },
-            {
-              id: `obj-dep-${record.objects[0].id}`,
-              label: 'Kapitel 1',
-              value: getDepartmentLabel(masterData, record.objects[0].departmentId),
-              editKey: `object:${record.objects[0].id}`,
-              ...pdfFieldRects.objectDepartment,
-            },
-            {
-              id: `obj-desc-${record.objects[0].id}`,
-              label: 'Kurzbeschreibung 1',
-              value: record.objects[0].shortDesc,
-              editKey: `object:${record.objects[0].id}`,
-              ...pdfFieldRects.objectShortDesc,
-            },
-            {
-              id: `obj-est-${record.objects[0].id}`,
-              label: 'Schaetzung 1',
-              value: `${record.objects[0].estimateLow || '-'} / ${record.objects[0].estimateHigh || '-'}`,
-              editKey: `object:${record.objects[0].id}`,
-              ...pdfFieldRects.objectEstimate,
-            },
-          ]
-        : []),
+      ...objectFields,
     ],
   },
-]
+  ...paginatePdfObjectPreviewEntries(buildPdfObjectPreviewEntries(record, masterData), PDF_OBJECT_MAX_UNITS_PER_PAGE)
+    .slice(1)
+    .map((entries, pageIndex) => {
+      const top = pdfOverflowFieldRects.objectIntNo.y
+      const totalHeight = pdfOverflowFieldRects.objectIntNo.h
+      const unitHeight = totalHeight / PDF_OBJECT_MAX_UNITS_PER_PAGE
+      let currentY = top
+
+      return {
+        id: `pdf-overflow-${pageIndex + 2}`,
+        title: `ELB-PDF Seite ${pageIndex + 2}`,
+        subtitle: 'Zusatzseite Objekte',
+        kind: 'pdf' as const,
+        fields: entries.map((entry) => {
+          const height = entry.lineUnits * unitHeight
+          const field = {
+            id: entry.id,
+            label: entry.label,
+            value: entry.value,
+            editKey: entry.editKey,
+            x: pdfOverflowFieldRects.objectIntNo.x,
+            y: currentY,
+            w: pdfOverflowFieldRects.objectEstimate.x + pdfOverflowFieldRects.objectEstimate.w - pdfOverflowFieldRects.objectIntNo.x,
+            h: Math.max(height - unitHeight * 0.1, unitHeight),
+          }
+          currentY += height
+          return field
+        }),
+      }
+    }),
+]}
 
 export const buildWordPreviewPages = (
   record: CaseRecord,
